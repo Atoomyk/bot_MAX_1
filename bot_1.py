@@ -20,7 +20,7 @@ from maxapi.utils.inline_keyboard import AttachmentType
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
-X_TUNNEL_URL = "https://069fe2cd-fa13-4bda-99b6-7b893d253bb2.tunnel4.com"
+X_TUNNEL_URL = "https://44b828f9-a359-4d81-92ed-31061fe4d785.tunnel4.com"
 
 bot = Bot(TOKEN)
 dp = Dispatcher()
@@ -35,6 +35,7 @@ GOSUSLUGI_APPOINTMENT_URL = "https://www.gosuslugi.ru/10700"
 GOSUSLUGI_MEDICAL_EXAM_URL = "https://www.gosuslugi.ru/647521/1/form"
 GOSUSLUGI_DOCTOR_HOME_URL = "https://www.gosuslugi.ru/600361"
 CONTACT_CENTER_URL = "https://sevmiac.ru/ekc/"
+MAP_OF_MEDICAL_INSTITUTIONS_URL = "https://yandex.ru/maps/959/sevastopol/search/%D0%B1%D0%BE%D0%BB%D1%8C%D0%BD%D0%B8%D1%86%D1%8B%20%D1%81%D0%B5%D0%B2%D0%B0%D1%81%D1%82%D0%BE%D0%BF%D0%BE%D0%BB%D1%8C/?ll=33.542596%2C44.577279&profile-mode=1&sctx=ZAAAAAgCEAAaKAoSCc0iFFtBJUNAEfYM4ZhlAUtAEhIJPgXAeAYN1z8RHCjwTj49wj8iBgABAgQFBigEOABAvwdIAWIaYWRkX3NuaXBwZXQ9bWV0YXJlYWx0eS8xLnhiHGFkZF9zbmlwcGV0PW1haW5fYXNwZWN0cy8xLnhiKXJlYXJyPXNjaGVtZV9Mb2NhbC9HZW8vTWV0YVJlYWx0eUtwcz0xMDAyagJydZUBAAAAAJ0BzczMPaABAagBAL0B09dLsMIBhwGI0oWYBI%2BevdYEmM%2BXmoAChf6Czky%2F3bm7BMGrr6oE1Oz6ngT91qOQtQK8ib%2FOiAXoteKRBMXVwJYEgcLQhgaczPbLBriO%2FskE1uOJgtoFkJjwtQaD48Tekgeq8ezXBq%2FLm%2BDCBMfokZuaA8nSo%2FkEiuHzlv8GktWn1IYB7bCdwuQF04y6xTmCAifQsdC%2B0LvRjNC90LjRhtGLINGB0LXQstCw0YHRgtC%2B0L%2FQvtC70YyKAiwxODQxMDU5NTYkMTg0MTA1OTU4JDUzNDM3MjYwNTU5JDE5ODM5NTI4OTU0MpICAzk1OZoCDGRlc2t0b3AtbWFwc6oCDDE2NTc0MjkxODkzOQ%3D%3D&sll=33.542596%2C44.577279&source=wizbiz_new_map_multi&sspn=0.240326%2C0.097050&z=13"
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +59,8 @@ def create_main_menu_keyboard():
         [LinkButton(text="Записаться на приём к врачу", url=GOSUSLUGI_APPOINTMENT_URL)],
         [LinkButton(text="Профосмотр/диспансеризация", url=GOSUSLUGI_MEDICAL_EXAM_URL)],
         [LinkButton(text="Вызов врача на дом", url=GOSUSLUGI_DOCTOR_HOME_URL)],
-        [LinkButton(text="Единый контакт-центр здравоохранения Севастополя", url=CONTACT_CENTER_URL)]
+        [LinkButton(text="Ближайшие гос мед учреждения", url=MAP_OF_MEDICAL_INSTITUTIONS_URL)],
+        [LinkButton(text="Единый контакт-центр", url=CONTACT_CENTER_URL)]
     ]
 
     buttons_payload = ButtonsPayload(buttons=buttons)
@@ -76,7 +78,7 @@ async def send_main_menu(bot_instance: Bot, chat_id: int, greeting_name: str):
 
     await bot_instance.send_message(
         chat_id=chat_id,
-        text=f"Здравствуйте, {greeting_name}!\n"
+        text=f"Здравствуйте, {greeting_name}!\n\n"
              "Выберите услугу:",
         attachments=[keyboard]
     )
@@ -120,9 +122,9 @@ async def request_phone_number(bot_instance: Bot, chat_id: int):
     """Запрашивает номер телефона"""
     await bot_instance.send_message(
         chat_id=chat_id,
-        text="Отлично! Теперь введите ваш номер телефона в формате:\n"
-             "+79781111111\n\n"
-             "Пример: +79781234567"
+        text="Отлично!\n"
+             "Теперь введите ваш номер телефона\n\n"
+             "Пример: +79781234567\n\n"
     )
 
 
@@ -140,8 +142,7 @@ async def complete_registration(bot_instance: Bot, chat_id: int, fio: str, phone
         # Отправляем сообщение об успешной регистрации
         await bot_instance.send_message(
             chat_id=chat_id,
-            text=f"✅ Успешная регистрация!\n\n"
-                 f"Здравствуйте, {greeting_name}! Я готов помочь. "
+            text=f"✅ Успешная регистрация!\n"
                  f"Теперь вы можете пользоваться всеми функциями бота."
         )
 
@@ -154,7 +155,7 @@ async def complete_registration(bot_instance: Bot, chat_id: int, fio: str, phone
         await bot_instance.send_message(
             chat_id=chat_id,
             text=f"🚨 Ошибка при регистрации. Комбинация ФИО и телефона уже существует.\n\n"
-                 f"Пожалуйста, попробуйте позже или обратитесь к администратору, {ADMIN_CONTACT}."
+                 f"Пожалуйста, обратитесь к администратору, {ADMIN_CONTACT}."
         )
 
 
@@ -195,8 +196,11 @@ async def bot_started(event: BotStarted):
                      'Вы обратились в Медицинский информационно-аналитический центр города Севастополя.\n'
                      'Наша система позволяет Вам удобно и быстро решить следующие задачи:\n\n'
                      '📌 Записаться на приём к врачу;\n'
-                     '📌 Пройти профилактический медосмотр или диспансеризацию.\n'
-                     '📌 Получать информацию по записям на приём к врачу.',
+                     '📌 Вызвать врача на дом;\n'
+                     '📌 Записаться на профилактический медосмотр/диспансеризацию;\n'
+                     '📌 Получать уведомления о записи к врачу с возможностью её отмены;\n'
+                     '📌 Найти ближайшие государственные медицинские учреждения;'
+                ,
                 attachments=[keyboard_attachment]
             )
 

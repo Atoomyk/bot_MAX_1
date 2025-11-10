@@ -11,7 +11,8 @@ from maxapi.types import (
     MessageCreated,
     Attachment,
     ButtonsPayload,
-    CallbackButton
+    CallbackButton,
+    LinkButton
 )
 from maxapi.utils.inline_keyboard import AttachmentType
 
@@ -19,7 +20,7 @@ from maxapi.utils.inline_keyboard import AttachmentType
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
-X_TUNNEL_URL = "https://717ec0a7-1b1e-4142-84c1-282027d87379.tunnel4.com"
+X_TUNNEL_URL = "https://069fe2cd-fa13-4bda-99b6-7b893d253bb2.tunnel4.com"
 
 bot = Bot(TOKEN)
 dp = Dispatcher()
@@ -28,6 +29,12 @@ SOGL_LINK = "https://sevmiac.ru/company/dokumenty/"
 CONTINUE_CALLBACK = "start_continue"
 AGREEMENT_CALLBACK = "agreement_accepted"
 ADMIN_CONTACT = "@admin_MIAC"
+
+# Ссылки для кнопок главного меню
+GOSUSLUGI_APPOINTMENT_URL = "https://www.gosuslugi.ru/10700"
+GOSUSLUGI_MEDICAL_EXAM_URL = "https://www.gosuslugi.ru/647521/1/form"
+GOSUSLUGI_DOCTOR_HOME_URL = "https://www.gosuslugi.ru/600361"
+CONTACT_CENTER_URL = "https://sevmiac.ru/ekc/"
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +51,36 @@ last_processed = {}
 
 
 # --- Вспомогательные функции ---
+
+def create_main_menu_keyboard():
+    """Создает клавиатуру главного меню с 4 кнопками"""
+    buttons = [
+        [LinkButton(text="Записаться на приём к врачу", url=GOSUSLUGI_APPOINTMENT_URL)],
+        [LinkButton(text="Профосмотр/диспансеризация", url=GOSUSLUGI_MEDICAL_EXAM_URL)],
+        [LinkButton(text="Вызов врача на дом", url=GOSUSLUGI_DOCTOR_HOME_URL)],
+        [LinkButton(text="Единый контакт-центр здравоохранения Севастополя", url=CONTACT_CENTER_URL)]
+    ]
+
+    buttons_payload = ButtonsPayload(buttons=buttons)
+    keyboard_attachment = Attachment(
+        type=AttachmentType.INLINE_KEYBOARD,
+        payload=buttons_payload
+    )
+
+    return keyboard_attachment
+
+
+async def send_main_menu(bot_instance: Bot, chat_id: int, greeting_name: str):
+    """Отправляет главное меню с приветствием"""
+    keyboard = create_main_menu_keyboard()
+
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text=f"Здравствуйте, {greeting_name}!\n"
+             "Выберите услугу:",
+        attachments=[keyboard]
+    )
+
 
 async def send_agreement_message(bot_instance: Bot, chat_id: int):
     """Отправляет сообщение с соглашением"""
@@ -90,7 +127,7 @@ async def request_phone_number(bot_instance: Bot, chat_id: int):
 
 
 async def complete_registration(bot_instance: Bot, chat_id: int, fio: str, phone: str):
-    """Завершает регистрацию"""
+    """Завершает регистрацию и показывает главное меню"""
     success = db.register_user(str(chat_id), fio, phone)
 
     if success:
@@ -100,12 +137,17 @@ async def complete_registration(bot_instance: Bot, chat_id: int, fio: str, phone
         # Получаем приветствие по имени и отчеству
         greeting_name = db.get_user_greeting(str(chat_id))
 
+        # Отправляем сообщение об успешной регистрации
         await bot_instance.send_message(
             chat_id=chat_id,
             text=f"✅ Успешная регистрация!\n\n"
                  f"Здравствуйте, {greeting_name}! Я готов помочь. "
                  f"Теперь вы можете пользоваться всеми функциями бота."
         )
+
+        # Отправляем главное меню
+        await send_main_menu(bot_instance, chat_id, greeting_name)
+
     else:
         # Ошибка при сохранении
         user_states.pop(str(chat_id), None)
@@ -129,27 +171,34 @@ async def bot_started(event: BotStarted):
         return
 
     try:
-        continue_button = CallbackButton(
-            text="Продолжить",
-            payload=CONTINUE_CALLBACK
-        )
+        # Проверяем, зарегистрирован ли пользователь
+        if db.is_user_registered(chat_id_str):
+            # Пользователь уже зарегистрирован - показываем главное меню
+            greeting_name = db.get_user_greeting(chat_id_str)
+            await send_main_menu(event.bot, chat_id, greeting_name)
+        else:
+            # Начинаем регистрацию
+            continue_button = CallbackButton(
+                text="Продолжить",
+                payload=CONTINUE_CALLBACK
+            )
 
-        buttons_payload = ButtonsPayload(buttons=[[continue_button]])
-        keyboard_attachment = Attachment(
-            type=AttachmentType.INLINE_KEYBOARD,
-            payload=buttons_payload
-        )
+            buttons_payload = ButtonsPayload(buttons=[[continue_button]])
+            keyboard_attachment = Attachment(
+                type=AttachmentType.INLINE_KEYBOARD,
+                payload=buttons_payload
+            )
 
-        await event.bot.send_message(
-            chat_id=chat_id,
-            text='Здравствуйте! 👩‍⚕️\n\n'
-                 'Вы обратились в Медицинский информационно-аналитический центр города Севастополя.\n'
-                 'Наша система позволяет Вам удобно и быстро решить следующие задачи:\n\n'
-                 '📌 Записаться на приём к врачу;\n'
-                 '📌 Пройти профилактический медосмотр или диспансеризацию.\n'
-                 '📌 Получать информацию по записям на приём к врачу.',
-            attachments=[keyboard_attachment]
-        )
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text='Здравствуйте! 👩‍⚕️\n\n'
+                     'Вы обратились в Медицинский информационно-аналитический центр города Севастополя.\n'
+                     'Наша система позволяет Вам удобно и быстро решить следующие задачи:\n\n'
+                     '📌 Записаться на приём к врачу;\n'
+                     '📌 Пройти профилактический медосмотр или диспансеризацию.\n'
+                     '📌 Получать информацию по записям на приём к врачу.',
+                attachments=[keyboard_attachment]
+            )
 
         greeted_users.add(chat_id_str)
     except Exception as e:
@@ -177,8 +226,6 @@ async def message_callback(event: MessageCallback):
         if len(processed_callbacks) > 1000:
             processed_callbacks.clear()
 
-    await event.message.answer('Обрабатываю...')
-
     if event.callback.payload == CONTINUE_CALLBACK:
         await send_agreement_message(event.bot, chat_id)
 
@@ -187,8 +234,8 @@ async def message_callback(event: MessageCallback):
 
 
 @dp.message_created()
-async def handle_registration_input(event: MessageCreated):
-    """Обработка текстовых сообщений для регистрации"""
+async def handle_message(event: MessageCreated):
+    """Обработка всех текстовых сообщений"""
     chat_id = event.message.recipient.chat_id
     chat_id_str = str(chat_id)
 
@@ -213,15 +260,17 @@ async def handle_registration_input(event: MessageCreated):
     if not message_text:
         return
 
-    # Если пользователь уже зарегистрирован и не в процессе регистрации, игнорируем
+    # Если пользователь зарегистрирован - показываем главное меню
     if db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
+        greeting_name = db.get_user_greeting(chat_id_str)
+        await send_main_menu(event.bot, chat_id, greeting_name)
         return
 
     # Если пользователь не зарегистрирован и не в процессе регистрации, игнорируем
     if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
         return
 
-    # Проверяем состояние пользователя
+    # Проверяем состояние пользователя (процесс регистрации)
     state = user_states.get(chat_id_str)
     if not state:
         return

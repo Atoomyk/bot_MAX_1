@@ -26,20 +26,45 @@ dp = Dispatcher()
 
 SOGL_LINK = "https://sevmiac.ru/company/dokumenty/"
 CONTINUE_CALLBACK = "start_continue"
+AGREEMENT_CALLBACK = "agreement_accepted"
 
 
 async def send_agreement_message(bot_instance: Bot, chat_id: int):
+    agreement_button = CallbackButton(
+        text="Согласие на обработку персональных данных",
+        payload=AGREEMENT_CALLBACK,
+        intent=Intent.DEFAULT
+    )
+
+    buttons_payload = ButtonsPayload(
+        buttons=[[agreement_button]]
+    )
+
+    keyboard_attachment = Attachment(
+        type=AttachmentType.INLINE_KEYBOARD,
+        payload=buttons_payload
+    )
+
     await bot_instance.send_message(
         chat_id=chat_id,
         text='Продолжая, Вы даёте согласие на обработку персональных данных.\n'
-             f'Ознакомиться с документом вы можете по ссылке {SOGL_LINK}'
+             f'Ознакомиться с документом вы можете по ссылке {SOGL_LINK}',
+        attachments=[keyboard_attachment]
+    )
+
+
+async def send_registration_request(bot_instance: Bot, chat_id: int):
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text='Для начала работы необходимо пройти регистрацию.\n'
+             'Пожалуйста, введите ваше ФИО в формате:\n'
+             'Фамилия Имя Отчество\n'
+             'Пример: Иванов Иван Иванович'
     )
 
 
 @dp.bot_started()
 async def bot_started(event: BotStarted):
-    logging.info(f"BotStarted received: chat_id={event.chat_id}")
-
     continue_button = CallbackButton(
         text="Продолжить",
         payload=CONTINUE_CALLBACK,
@@ -55,7 +80,7 @@ async def bot_started(event: BotStarted):
         payload=buttons_payload
     )
 
-    result = await event.bot.send_message(
+    await event.bot.send_message(
         chat_id=event.chat_id,
         text='Здравствуйте! 👩‍⚕️\n\n'
              'Вы обратились в Медицинский информационно-аналитический центр города Севастополя.\n'
@@ -65,32 +90,28 @@ async def bot_started(event: BotStarted):
              '📌 Получать информацию по записям на приём к врачу.',
         attachments=[keyboard_attachment]
     )
-    logging.info(f"Message sent: {result}")
 
 
 @dp.message_callback()
 async def message_callback(callback: MessageCallback):
-    logging.info(f"=== CALLBACK RECEIVED ===")
-    logging.info(f"Callback payload: {callback.callback.payload}")
-
     # Отвечаем на callback с текстом (нельзя пустой)
     await callback.message.answer('Обрабатываю...')
 
     if callback.callback.payload == CONTINUE_CALLBACK:
-        logging.info("Processing continue button...")
-
         # Получаем chat_id из recipient сообщения
         chat_id = callback.message.recipient.chat_id
         await send_agreement_message(callback.bot, chat_id)
-        logging.info("Agreement message sent successfully")
+
+    elif callback.callback.payload == AGREEMENT_CALLBACK:
+        # Получаем chat_id из recipient сообщения
+        chat_id = callback.message.recipient.chat_id
+        await send_registration_request(callback.bot, chat_id)
 
 
 # Функция для настройки вебхука
 async def setup_webhook():
     """Настраивает вебхук через Xtunnel"""
-    logging.info(f"Setting up webhook to: {X_TUNNEL_URL}")
-
-    result = await bot.subscribe_webhook(
+    await bot.subscribe_webhook(
         url=X_TUNNEL_URL,
         update_types=[
             "message_created",
@@ -98,11 +119,6 @@ async def setup_webhook():
             "bot_started"
         ]
     )
-    logging.info(f"Webhook setup result: {result}")
-
-    # Проверим текущие подписки
-    subscriptions = await bot.get_subscriptions()
-    logging.info(f"Current subscriptions: {subscriptions}")
 
 
 # Запуск через webhook
@@ -111,7 +127,6 @@ async def main():
     await setup_webhook()
 
     # Затем запускаем сервер
-    logging.info("Starting webhook server on port 80...")
     await dp.handle_webhook(
         bot=bot,
         host='0.0.0.0',

@@ -1,21 +1,21 @@
 import asyncio
 import logging
 import os
+import time
 from dotenv import load_dotenv
 
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
     BotStarted,
     MessageCallback,
+    MessageCreated,
     Attachment,
     ButtonsPayload,
     CallbackButton
 )
-from maxapi.enums.attachment import AttachmentType
-from maxapi.enums.intent import Intent
+from maxapi.utils.inline_keyboard import AttachmentType
 
-logging.basicConfig(level=logging.INFO)
-
+# Загрузка переменных окружения
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
@@ -27,19 +27,32 @@ dp = Dispatcher()
 SOGL_LINK = "https://sevmiac.ru/company/dokumenty/"
 CONTINUE_CALLBACK = "start_continue"
 AGREEMENT_CALLBACK = "agreement_accepted"
+ADMIN_CONTACT = "@admin_MIAC"
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
+# Импорт базы данных из отдельного файла
+from user_database import db
+
+# Словари для хранения состояний и защиты от дублирования
+user_states = {}
+greeted_users = set()
+processed_messages = set()
+processed_callbacks = set()
+last_processed = {}
+
+
+# --- Вспомогательные функции ---
 
 async def send_agreement_message(bot_instance: Bot, chat_id: int):
+    """Отправляет сообщение с соглашением"""
     agreement_button = CallbackButton(
         text="Согласие на обработку персональных данных",
-        payload=AGREEMENT_CALLBACK,
-        intent=Intent.DEFAULT
+        payload=AGREEMENT_CALLBACK
     )
 
-    buttons_payload = ButtonsPayload(
-        buttons=[[agreement_button]]
-    )
-
+    buttons_payload = ButtonsPayload(buttons=[[agreement_button]])
     keyboard_attachment = Attachment(
         type=AttachmentType.INLINE_KEYBOARD,
         payload=buttons_payload
@@ -53,64 +66,234 @@ async def send_agreement_message(bot_instance: Bot, chat_id: int):
     )
 
 
-async def send_registration_request(bot_instance: Bot, chat_id: int):
+async def start_fio_request(bot_instance: Bot, chat_id: int):
+    """Начинает процесс регистрации - запрос ФИО"""
+    user_states[str(chat_id)] = 'waiting_fio'
+
     await bot_instance.send_message(
         chat_id=chat_id,
         text='Для начала работы необходимо пройти регистрацию.\n'
              'Пожалуйста, введите ваше ФИО в формате:\n'
-             'Фамилия Имя Отчество\n'
+             'Фамилия Имя Отчество\n\n'
              'Пример: Иванов Иван Иванович'
     )
 
 
+async def request_phone_number(bot_instance: Bot, chat_id: int):
+    """Запрашивает номер телефона"""
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text="Отлично! Теперь введите ваш номер телефона в формате:\n"
+             "+79781111111\n\n"
+             "Пример: +79781234567"
+    )
+
+
+async def complete_registration(bot_instance: Bot, chat_id: int, fio: str, phone: str):
+    """Завершает регистрацию"""
+    success = db.register_user(str(chat_id), fio, phone)
+
+    if success:
+        # Удаляем состояние перед отправкой сообщения
+        user_states.pop(str(chat_id), None)
+
+        # Получаем приветствие по имени и отчеству
+        greeting_name = db.get_user_greeting(str(chat_id))
+
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text=f"✅ Успешная регистрация!\n\n"
+                 f"Здравствуйте, {greeting_name}! Я готов помочь. "
+                 f"Теперь вы можете пользоваться всеми функциями бота."
+        )
+    else:
+        # Ошибка при сохранении
+        user_states.pop(str(chat_id), None)
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text=f"🚨 Ошибка при регистрации. Комбинация ФИО и телефона уже существует.\n\n"
+                 f"Пожалуйста, попробуйте позже или обратитесь к администратору, {ADMIN_CONTACT}."
+        )
+
+
+# --- Обработчики событий ---
+
 @dp.bot_started()
 async def bot_started(event: BotStarted):
-    continue_button = CallbackButton(
-        text="Продолжить",
-        payload=CONTINUE_CALLBACK,
-        intent=Intent.DEFAULT
-    )
+    """Обработка запуска бота"""
+    chat_id = event.chat_id
+    chat_id_str = str(chat_id)
 
-    buttons_payload = ButtonsPayload(
-        buttons=[[continue_button]]
-    )
+    # Проверяем, не отправляли ли уже приветствие
+    if chat_id_str in greeted_users:
+        return
 
-    keyboard_attachment = Attachment(
-        type=AttachmentType.INLINE_KEYBOARD,
-        payload=buttons_payload
-    )
+    try:
+        continue_button = CallbackButton(
+            text="Продолжить",
+            payload=CONTINUE_CALLBACK
+        )
 
-    await event.bot.send_message(
-        chat_id=event.chat_id,
-        text='Здравствуйте! 👩‍⚕️\n\n'
-             'Вы обратились в Медицинский информационно-аналитический центр города Севастополя.\n'
-             'Наша система позволяет Вам удобно и быстро решить следующие задачи:\n\n'
-             '📌 Записаться на приём к врачу;\n'
-             '📌 Пройти профилактический медосмотр или диспансеризацию.\n'
-             '📌 Получать информацию по записям на приём к врачу.',
-        attachments=[keyboard_attachment]
-    )
+        buttons_payload = ButtonsPayload(buttons=[[continue_button]])
+        keyboard_attachment = Attachment(
+            type=AttachmentType.INLINE_KEYBOARD,
+            payload=buttons_payload
+        )
+
+        await event.bot.send_message(
+            chat_id=chat_id,
+            text='Здравствуйте! 👩‍⚕️\n\n'
+                 'Вы обратились в Медицинский информационно-аналитический центр города Севастополя.\n'
+                 'Наша система позволяет Вам удобно и быстро решить следующие задачи:\n\n'
+                 '📌 Записаться на приём к врачу;\n'
+                 '📌 Пройти профилактический медосмотр или диспансеризацию.\n'
+                 '📌 Получать информацию по записям на приём к врачу.',
+            attachments=[keyboard_attachment]
+        )
+
+        greeted_users.add(chat_id_str)
+    except Exception as e:
+        logging.warning(f"Не удалось отправить сообщение пользователю {chat_id}: {e}")
 
 
 @dp.message_callback()
-async def message_callback(callback: MessageCallback):
-    # Отвечаем на callback с текстом (нельзя пустой)
-    await callback.message.answer('Обрабатываю...')
+async def message_callback(event: MessageCallback):
+    """Обработка нажатий на инлайн-кнопки"""
+    chat_id = event.message.recipient.chat_id
+    chat_id_str = str(chat_id)
 
-    if callback.callback.payload == CONTINUE_CALLBACK:
-        # Получаем chat_id из recipient сообщения
-        chat_id = callback.message.recipient.chat_id
-        await send_agreement_message(callback.bot, chat_id)
+    # Защита от дублирования
+    current_time = time.time()
+    if chat_id_str in last_processed:
+        if current_time - last_processed[chat_id_str] < 1.0:
+            return
+    last_processed[chat_id_str] = current_time
 
-    elif callback.callback.payload == AGREEMENT_CALLBACK:
-        # Получаем chat_id из recipient сообщения
-        chat_id = callback.message.recipient.chat_id
-        await send_registration_request(callback.bot, chat_id)
+    callback_id = event.callback.callback_id if hasattr(event.callback, 'callback_id') else None
+    if callback_id and callback_id in processed_callbacks:
+        return
+    if callback_id:
+        processed_callbacks.add(callback_id)
+        if len(processed_callbacks) > 1000:
+            processed_callbacks.clear()
+
+    await event.message.answer('Обрабатываю...')
+
+    if event.callback.payload == CONTINUE_CALLBACK:
+        await send_agreement_message(event.bot, chat_id)
+
+    elif event.callback.payload == AGREEMENT_CALLBACK:
+        await start_fio_request(event.bot, chat_id)
 
 
-# Функция для настройки вебхука
+@dp.message_created()
+async def handle_registration_input(event: MessageCreated):
+    """Обработка текстовых сообщений для регистрации"""
+    chat_id = event.message.recipient.chat_id
+    chat_id_str = str(chat_id)
+
+    # Проверяем базовые условия
+    if not event.message.body or not event.message.body.text:
+        return
+
+    if not event.message.sender:
+        return
+
+    # Защита от дублирования
+    message_id = event.message.body.mid if hasattr(event.message.body, 'mid') else None
+    if message_id and message_id in processed_messages:
+        return
+    if message_id:
+        processed_messages.add(message_id)
+        if len(processed_messages) > 1000:
+            processed_messages.clear()
+
+    message_text = event.message.body.text.strip()
+
+    if not message_text:
+        return
+
+    # Если пользователь уже зарегистрирован и не в процессе регистрации, игнорируем
+    if db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
+        return
+
+    # Если пользователь не зарегистрирован и не в процессе регистрации, игнорируем
+    if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
+        return
+
+    # Проверяем состояние пользователя
+    state = user_states.get(chat_id_str)
+    if not state:
+        return
+
+    # --- Ожидание ФИО ---
+    if state == 'waiting_fio':
+        if not message_text:
+            await event.message.answer(
+                "ФИО не может быть пустым. Пожалуйста, введите ваше ФИО в формате: Фамилия Имя Отчество"
+            )
+            return
+
+        if not db.validate_fio(message_text):
+            await event.message.answer(
+                "❌ Ошибка формата!\n\n"
+                "Пожалуйста, введите ваше ФИО в таком формате: Фамилия Имя Отчество\n\n"
+                "Пример: Иванов Иван Иванович"
+            )
+            return
+
+        # Сохраняем ФИО и переходим к телефону
+        user_states[chat_id_str] = {
+            'state': 'waiting_phone',
+            'fio': message_text
+        }
+
+        # Защита от дублирования
+        current_time = time.time()
+        if chat_id_str in last_processed:
+            if current_time - last_processed[chat_id_str] < 0.5:
+                return
+        last_processed[chat_id_str] = current_time
+
+        await request_phone_number(event.bot, chat_id)
+
+    # --- Ожидание телефона ---
+    elif isinstance(state, dict) and state.get('state') == 'waiting_phone':
+        if not message_text:
+            await event.message.answer(
+                "Номер телефона не может быть пустым. Пожалуйста, введите Ваш номер телефона в формате: +79781111111"
+            )
+            return
+
+        # Нормализуем телефон
+        phone_normalized = message_text.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').strip()
+
+        if not db.validate_phone(phone_normalized):
+            await event.message.answer(
+                "❌ Ошибка формата!\n\n"
+                "Пожалуйста, введите Ваш номер телефона в таком формате:\n"
+                "+79781111111\n\n"
+                "Пример: +79781234567"
+            )
+            return
+
+        # Регистрируем пользователя
+        fio = state['fio']
+
+        # Проверяем, не зарегистрирован ли уже пользователь
+        if db.is_user_registered(chat_id_str):
+            user_states.pop(chat_id_str, None)
+            return
+
+        # Завершаем регистрацию
+        await complete_registration(event.bot, chat_id, fio, phone_normalized)
+
+
+# --- Запуск вебхука ---
+
 async def setup_webhook():
     """Настраивает вебхук через Xtunnel"""
+    logging.info(f"Setting up webhook to URL: {X_TUNNEL_URL}")
     await bot.subscribe_webhook(
         url=X_TUNNEL_URL,
         update_types=[
@@ -119,14 +302,15 @@ async def setup_webhook():
             "bot_started"
         ]
     )
+    logging.info("Webhook setup complete.")
 
 
-# Запуск через webhook
 async def main():
     # Сначала настраиваем вебхук
     await setup_webhook()
 
     # Затем запускаем сервер
+    logging.info("Starting webhook server...")
     await dp.handle_webhook(
         bot=bot,
         host='0.0.0.0',
@@ -135,5 +319,8 @@ async def main():
     )
 
 
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Bot stopped manually.")

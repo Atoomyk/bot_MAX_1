@@ -20,7 +20,7 @@ from maxapi.utils.inline_keyboard import AttachmentType
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
-X_TUNNEL_URL = "https://44b828f9-a359-4d81-92ed-31061fe4d785.tunnel4.com"
+X_TUNNEL_URL = "https://1eca42f8-7ea0-48de-bcf6-939849243cab.tunnel4.com"
 
 bot = Bot(TOKEN)
 dp = Dispatcher()
@@ -29,6 +29,12 @@ SOGL_LINK = "https://sevmiac.ru/company/dokumenty/"
 CONTINUE_CALLBACK = "start_continue"
 AGREEMENT_CALLBACK = "agreement_accepted"
 ADMIN_CONTACT = "@admin_MIAC"
+
+# Новые callback-ы для системы исправления данных
+CORRECT_FIO_CALLBACK = "correct_fio"
+CORRECT_BIRTH_DATE_CALLBACK = "correct_birth_date"
+CORRECT_PHONE_CALLBACK = "correct_phone"
+CONFIRM_DATA_CALLBACK = "confirm_data"
 
 # Ссылки для кнопок главного меню
 GOSUSLUGI_APPOINTMENT_URL = "https://www.gosuslugi.ru/10700"
@@ -107,16 +113,50 @@ async def send_agreement_message(bot_instance: Bot, chat_id: int):
 
 async def start_fio_request(bot_instance: Bot, chat_id: int):
     """Начинает процесс регистрации - запрос ФИО"""
-    user_states[str(chat_id)] = 'waiting_fio'
+    user_states[str(chat_id)] = {'state': 'waiting_fio', 'data': {}}
 
+
+    # Первое сообщение
     await bot_instance.send_message(
         chat_id=chat_id,
-        text='Для начала работы необходимо пройти регистрацию.\n'
-             'Пожалуйста, введите ваше ФИО в формате:\n'
+        text='Для начала работы необходимо пройти регистрацию.'
+    )
+
+    # Второе сообщение с инструкцией
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text='Пожалуйста, введите ваше ФИО в формате:\n'
              'Фамилия Имя Отчество\n\n'
              'Пример: Иванов Иван Иванович'
     )
 
+async def request_fio_correction(bot_instance: Bot, chat_id: int):
+    """Запрашивает ФИО для исправления (без сообщения о регистрации)"""
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text="Введите ваше ФИО для исправления:\n\n"
+             "Формат: Фамилия Имя Отчество\n"
+             "Пример: Иванов Иван Иванович"
+    )
+
+
+async def request_birth_date_correction(bot_instance: Bot, chat_id: int):
+    """Запрашивает дату рождения для исправления (без сообщения о регистрации)"""
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text="Введите вашу дату рождения для исправления:\n\n"
+             "Формат: ДД.ММ.ГГГГ\n"
+             "Пример: 13.03.2003"
+    )
+
+
+async def request_phone_correction(bot_instance: Bot, chat_id: int):
+    """Запрашивает телефон для исправления (без сообщения о регистрации)"""
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text="Введите ваш номер телефона для исправления:\n\n"
+             "Пример: +79781234567"
+    )
 
 async def request_phone_number(bot_instance: Bot, chat_id: int):
     """Запрашивает номер телефона"""
@@ -126,38 +166,6 @@ async def request_phone_number(bot_instance: Bot, chat_id: int):
              "Теперь введите ваш номер телефона\n\n"
              "Пример: +79781234567\n\n"
     )
-
-
-async def complete_registration(bot_instance: Bot, chat_id: int, fio: str, phone: str):
-    """Завершает регистрацию и показывает главное меню"""
-    success = db.register_user(str(chat_id), fio, phone)
-
-    if success:
-        # Удаляем состояние перед отправкой сообщения
-        user_states.pop(str(chat_id), None)
-
-        # Получаем приветствие по имени и отчеству
-        greeting_name = db.get_user_greeting(str(chat_id))
-
-        # Отправляем сообщение об успешной регистрации
-        await bot_instance.send_message(
-            chat_id=chat_id,
-            text=f"✅ Успешная регистрация!\n"
-                 f"Теперь вы можете пользоваться всеми функциями бота."
-        )
-
-        # Отправляем главное меню
-        await send_main_menu(bot_instance, chat_id, greeting_name)
-
-    else:
-        # Ошибка при сохранении
-        user_states.pop(str(chat_id), None)
-        await bot_instance.send_message(
-            chat_id=chat_id,
-            text=f"🚨 Ошибка при регистрации. Комбинация ФИО и телефона уже существует.\n\n"
-                 f"Пожалуйста, обратитесь к администратору, {ADMIN_CONTACT}."
-        )
-
 
 # --- Обработчики событий ---
 
@@ -209,6 +217,99 @@ async def bot_started(event: BotStarted):
         logging.warning(f"Не удалось отправить сообщение пользователю {chat_id}: {e}")
 
 
+async def request_birth_date(bot_instance: Bot, chat_id: int):
+    """Запрашивает дату рождения"""
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text="Отлично!\n"
+             "Теперь введите вашу дату рождения\n\n"
+             "Формат: ДД.ММ.ГГГГ\n"
+             "Пример: 13.03.2003"
+    )
+
+
+async def send_confirmation_message(bot_instance: Bot, chat_id: int, user_data: dict):
+    """Отправляет сообщение с подтверждением данных"""
+    fio = user_data.get('fio', 'Не указано')
+    birth_date = user_data.get('birth_date', 'Не указано')
+    phone = user_data.get('phone', 'Не указано')
+
+    # Создаем кнопки для исправления
+    correct_fio_button = CallbackButton(
+        text="Исправить ФИО",
+        payload=CORRECT_FIO_CALLBACK
+    )
+    correct_birth_date_button = CallbackButton(
+        text="Исправить дату рождения",
+        payload=CORRECT_BIRTH_DATE_CALLBACK
+    )
+    correct_phone_button = CallbackButton(
+        text="Исправить телефон",
+        payload=CORRECT_PHONE_CALLBACK
+    )
+    confirm_button = CallbackButton(
+        text="✅ Всё верно, подтвердить",
+        payload=CONFIRM_DATA_CALLBACK
+    )
+
+    buttons_payload = ButtonsPayload(buttons=[
+        [correct_fio_button],
+        [correct_birth_date_button],
+        [correct_phone_button],
+        [confirm_button]
+    ])
+    keyboard_attachment = Attachment(
+        type=AttachmentType.INLINE_KEYBOARD,
+        payload=buttons_payload
+    )
+
+    await bot_instance.send_message(
+        chat_id=chat_id,
+        text="📋 Пожалуйста, проверьте введенные данные:\n\n"
+             f"👤 ФИО: {fio}\n\n"
+             f"🎂 Дата рождения: {birth_date}\n\n"
+             f"📞 Телефон: {phone}\n\n"
+             "Если всё верно - нажмите 'Подтвердить', "
+             "или выберите что нужно исправить:",
+        attachments=[keyboard_attachment]
+    )
+
+
+async def complete_registration(bot_instance: Bot, chat_id: int, user_data: dict):
+    """Завершает регистрацию и показывает главное меню"""
+    fio = user_data['fio']
+    birth_date = user_data['birth_date']
+    phone = user_data['phone']
+
+    success = db.register_user(str(chat_id), fio, phone, birth_date)
+
+    if success:
+        # Удаляем состояние перед отправкой сообщения
+        user_states.pop(str(chat_id), None)
+
+        # Получаем приветствие по имени и отчеству
+        greeting_name = db.get_user_greeting(str(chat_id))
+
+        # Отправляем сообщение об успешной регистрации
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text=f"✅ Успешная регистрация!\n"
+                 f"Теперь вы можете пользоваться всеми функциями бота."
+        )
+
+        # Отправляем главное меню
+        await send_main_menu(bot_instance, chat_id, greeting_name)
+
+    else:
+        # Ошибка при сохранении
+        user_states.pop(str(chat_id), None)
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text=f"🚨 Ошибка при регистрации. Комбинация ФИО и телефона уже существует.\n\n"
+                 f"Пожалуйста, обратитесь к администратору, {ADMIN_CONTACT}."
+        )
+
+
 @dp.message_callback()
 async def message_callback(event: MessageCallback):
     """Обработка нажатий на инлайн-кнопки"""
@@ -233,8 +334,58 @@ async def message_callback(event: MessageCallback):
     if event.callback.payload == CONTINUE_CALLBACK:
         await send_agreement_message(event.bot, chat_id)
 
+
     elif event.callback.payload == AGREEMENT_CALLBACK:
+
         await start_fio_request(event.bot, chat_id)
+
+
+    # Обработка кнопок исправления данных
+    elif event.callback.payload == CORRECT_FIO_CALLBACK:
+        # Сохраняем уже введенные данные кроме ФИО
+        current_data = user_states.get(chat_id_str, {}).get('data', {})
+        current_data.pop('fio', None)  # Удаляем старое ФИО
+        user_states[chat_id_str] = {'state': 'waiting_fio', 'data': current_data}
+        await request_fio_correction(event.bot, chat_id)  # ← НОВАЯ ФУНКЦИЯ
+
+    elif event.callback.payload == CORRECT_BIRTH_DATE_CALLBACK:
+        # Сохраняем уже введенные данные кроме даты рождения
+        current_data = user_states.get(chat_id_str, {}).get('data', {})
+        current_data.pop('birth_date', None)  # Удаляем старую дату
+        user_states[chat_id_str] = {'state': 'waiting_birth_date', 'data': current_data}
+        await request_birth_date_correction(event.bot, chat_id)  # ← НОВАЯ ФУНКЦИЯ
+
+    elif event.callback.payload == CORRECT_PHONE_CALLBACK:
+        # Сохраняем уже введенные данные кроме телефона
+        current_data = user_states.get(chat_id_str, {}).get('data', {})
+        current_data.pop('phone', None)  # Удаляем старый телефон
+        user_states[chat_id_str] = {'state': 'waiting_phone', 'data': current_data}
+        await request_phone_correction(event.bot, chat_id)  # ← НОВАЯ ФУНКЦИЯ
+
+
+    elif event.callback.payload == CONFIRM_DATA_CALLBACK:
+
+        # Завершаем регистрацию
+
+        user_data = user_states.get(chat_id_str, {}).get('data', {})
+
+        if user_data and all(key in user_data for key in ['fio', 'birth_date', 'phone']):
+
+            await complete_registration(event.bot, chat_id, user_data)
+
+        else:
+
+            # Если данных недостаточно, начинаем заново
+
+            await event.bot.send_message(
+
+                chat_id=chat_id,
+
+                text="❌ Не все данные заполнены. Начинаем регистрацию заново."
+
+            )
+
+            await start_fio_request(event.bot, chat_id)
 
 
 @dp.message_created()
@@ -264,20 +415,17 @@ async def handle_message(event: MessageCreated):
     if not message_text:
         return
 
-    # Если пользователь зарегистрирован - показываем главное меню
-    if db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
-        greeting_name = db.get_user_greeting(chat_id_str)
-        await send_main_menu(event.bot, chat_id, greeting_name)
-        return
-
     # Если пользователь не зарегистрирован и не в процессе регистрации, игнорируем
     if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
         return
 
     # Проверяем состояние пользователя (процесс регистрации)
-    state = user_states.get(chat_id_str)
-    if not state:
+    state_info = user_states.get(chat_id_str)
+    if not state_info:
         return
+
+    state = state_info.get('state')
+    user_data = state_info.get('data', {})
 
     # --- Ожидание ФИО ---
     if state == 'waiting_fio':
@@ -295,10 +443,43 @@ async def handle_message(event: MessageCreated):
             )
             return
 
-        # Сохраняем ФИО и переходим к телефону
+        # Сохраняем ФИО и переходим к дате рождения
+        user_data['fio'] = message_text
+        user_states[chat_id_str] = {
+            'state': 'waiting_birth_date',
+            'data': user_data
+        }
+
+        # Защита от дублирования
+        current_time = time.time()
+        if chat_id_str in last_processed:
+            if current_time - last_processed[chat_id_str] < 0.5:
+                return
+        last_processed[chat_id_str] = current_time
+
+        await request_birth_date(event.bot, chat_id)
+
+    # --- Ожидание даты рождения ---
+    elif state == 'waiting_birth_date':
+        if not message_text:
+            await event.message.answer(
+                "Дата рождения не может быть пустой. Пожалуйста, введите дату в формате: ДД.ММ.ГГГГ"
+            )
+            return
+
+        if not db.validate_birth_date(message_text):
+            await event.message.answer(
+                "❌ Ошибка формата!\n\n"
+                "Пожалуйста, введите дату рождения в формате: ДД.ММ.ГГГГ\n\n"
+                "Пример: 13.03.2003"
+            )
+            return
+
+        # Сохраняем дату рождения и переходим к телефону
+        user_data['birth_date'] = message_text
         user_states[chat_id_str] = {
             'state': 'waiting_phone',
-            'fio': message_text
+            'data': user_data
         }
 
         # Защита от дублирования
@@ -311,7 +492,7 @@ async def handle_message(event: MessageCreated):
         await request_phone_number(event.bot, chat_id)
 
     # --- Ожидание телефона ---
-    elif isinstance(state, dict) and state.get('state') == 'waiting_phone':
+    elif state == 'waiting_phone':
         if not message_text:
             await event.message.answer(
                 "Номер телефона не может быть пустым. Пожалуйста, введите Ваш номер телефона в формате: +79781111111"
@@ -330,16 +511,21 @@ async def handle_message(event: MessageCreated):
             )
             return
 
-        # Регистрируем пользователя
-        fio = state['fio']
+        # Сохраняем телефон и переходим к подтверждению
+        user_data['phone'] = phone_normalized
+        user_states[chat_id_str] = {
+            'state': 'waiting_confirmation',
+            'data': user_data
+        }
 
-        # Проверяем, не зарегистрирован ли уже пользователь
-        if db.is_user_registered(chat_id_str):
-            user_states.pop(chat_id_str, None)
-            return
+        # Защита от дублирования
+        current_time = time.time()
+        if chat_id_str in last_processed:
+            if current_time - last_processed[chat_id_str] < 0.5:
+                return
+        last_processed[chat_id_str] = current_time
 
-        # Завершаем регистрацию
-        await complete_registration(event.bot, chat_id, fio, phone_normalized)
+        await send_confirmation_message(event.bot, chat_id, user_data)
 
 
 # --- Запуск вебхука ---

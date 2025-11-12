@@ -40,6 +40,7 @@ CONFIRM_DATA_CALLBACK = "confirm_data"
 GOSUSLUGI_APPOINTMENT_URL = "https://www.gosuslugi.ru/10700"
 GOSUSLUGI_MEDICAL_EXAM_URL = "https://www.gosuslugi.ru/647521/1/form"
 GOSUSLUGI_DOCTOR_HOME_URL = "https://www.gosuslugi.ru/600361"
+GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL = "https://www.gosuslugi.ru/600360"
 CONTACT_CENTER_URL = "https://sevmiac.ru/ekc/"
 MAP_OF_MEDICAL_INSTITUTIONS_URL = "https://yandex.ru/maps/959/sevastopol/search/%D0%B1%D0%BE%D0%BB%D1%8C%D0%BD%D0%B8%D1%86%D1%8B%20%D1%81%D0%B5%D0%B2%D0%B0%D1%81%D1%82%D0%BE%D0%BF%D0%BE%D0%BB%D1%8C/?ll=33.542596%2C44.577279&profile-mode=1&sctx=ZAAAAAgCEAAaKAoSCc0iFFtBJUNAEfYM4ZhlAUtAEhIJPgXAeAYN1z8RHCjwTj49wj8iBgABAgQFBigEOABAvwdIAWIaYWRkX3NuaXBwZXQ9bWV0YXJlYWx0eS8xLnhiHGFkZF9zbmlwcGV0PW1haW5fYXNwZWN0cy8xLnhiKXJlYXJyPXNjaGVtZV9Mb2NhbC9HZW8vTWV0YVJlYWx0eUtwcz0xMDAyagJydZUBAAAAAJ0BzczMPaABAagBAL0B09dLsMIBhwGI0oWYBI%2BevdYEmM%2BXmoAChf6Czky%2F3bm7BMGrr6oE1Oz6ngT91qOQtQK8ib%2FOiAXoteKRBMXVwJYEgcLQhgaczPbLBriO%2FskE1uOJgtoFkJjwtQaD48Tekgeq8ezXBq%2FLm%2BDCBMfokZuaA8nSo%2FkEiuHzlv8GktWn1IYB7bCdwuQF04y6xTmCAifQsdC%2B0LvRjNC90LjRhtGLINGB0LXQstCw0YHRgtC%2B0L%2FQvtC70YyKAiwxODQxMDU5NTYkMTg0MTA1OTU4JDUzNDM3MjYwNTU5JDE5ODM5NTI4OTU0MpICAzk1OZoCDGRlc2t0b3AtbWFwc6oCDDE2NTc0MjkxODkzOQ%3D%3D&sll=33.542596%2C44.577279&source=wizbiz_new_map_multi&sspn=0.240326%2C0.097050&z=13"
 
@@ -65,6 +66,7 @@ def create_main_menu_keyboard():
         [LinkButton(text="Записаться на приём к врачу", url=GOSUSLUGI_APPOINTMENT_URL)],
         [LinkButton(text="Профосмотр/диспансеризация", url=GOSUSLUGI_MEDICAL_EXAM_URL)],
         [LinkButton(text="Вызов врача на дом", url=GOSUSLUGI_DOCTOR_HOME_URL)],
+        [LinkButton(text="Прикрепление к поликлинике", url=GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL)],
         [LinkButton(text="Ближайшие гос мед учреждения", url=MAP_OF_MEDICAL_INSTITUTIONS_URL)],
         [LinkButton(text="Единый контакт-центр", url=CONTACT_CENTER_URL)]
     ]
@@ -236,15 +238,15 @@ async def send_confirmation_message(bot_instance: Bot, chat_id: int, user_data: 
 
     # Создаем кнопки для исправления
     correct_fio_button = CallbackButton(
-        text="Исправить ФИО",
+        text="⚠️ Исправить ФИО",
         payload=CORRECT_FIO_CALLBACK
     )
     correct_birth_date_button = CallbackButton(
-        text="Исправить дату рождения",
+        text="⚠️ Исправить дату рождения",
         payload=CORRECT_BIRTH_DATE_CALLBACK
     )
     correct_phone_button = CallbackButton(
-        text="Исправить телефон",
+        text="⚠️ Исправить телефон",
         payload=CORRECT_PHONE_CALLBACK
     )
     confirm_button = CallbackButton(
@@ -443,21 +445,38 @@ async def handle_message(event: MessageCreated):
             )
             return
 
-        # Сохраняем ФИО и переходим к дате рождения
+        # Сохраняем ФИО
         user_data['fio'] = message_text
-        user_states[chat_id_str] = {
-            'state': 'waiting_birth_date',
-            'data': user_data
-        }
 
-        # Защита от дублирования
-        current_time = time.time()
-        if chat_id_str in last_processed:
-            if current_time - last_processed[chat_id_str] < 0.5:
-                return
-        last_processed[chat_id_str] = current_time
-
-        await request_birth_date(event.bot, chat_id)
+        # Проверяем, все ли данные уже есть для подтверждения
+        if all(key in user_data for key in ['fio', 'birth_date', 'phone']):
+            # Все данные есть - переходим к подтверждению
+            user_states[chat_id_str] = {
+                'state': 'waiting_confirmation',
+                'data': user_data
+            }
+            await send_confirmation_message(event.bot, chat_id, user_data)
+        elif 'birth_date' in user_data and 'phone' not in user_data:
+            # Есть ФИО и дата, но нет телефона
+            user_states[chat_id_str] = {
+                'state': 'waiting_phone',
+                'data': user_data
+            }
+            await request_phone_number(event.bot, chat_id)
+        elif 'birth_date' not in user_data:
+            # Нет даты рождения - запрашиваем её
+            user_states[chat_id_str] = {
+                'state': 'waiting_birth_date',
+                'data': user_data
+            }
+            await request_birth_date(event.bot, chat_id)
+        else:
+            # Во всех остальных случаях переходим к подтверждению
+            user_states[chat_id_str] = {
+                'state': 'waiting_confirmation',
+                'data': user_data
+            }
+            await send_confirmation_message(event.bot, chat_id, user_data)
 
     # --- Ожидание даты рождения ---
     elif state == 'waiting_birth_date':
@@ -475,21 +494,31 @@ async def handle_message(event: MessageCreated):
             )
             return
 
-        # Сохраняем дату рождения и переходим к телефону
+        # Сохраняем дату рождения
         user_data['birth_date'] = message_text
-        user_states[chat_id_str] = {
-            'state': 'waiting_phone',
-            'data': user_data
-        }
 
-        # Защита от дублирования
-        current_time = time.time()
-        if chat_id_str in last_processed:
-            if current_time - last_processed[chat_id_str] < 0.5:
-                return
-        last_processed[chat_id_str] = current_time
-
-        await request_phone_number(event.bot, chat_id)
+        # Проверяем, все ли данные уже есть для подтверждения
+        if all(key in user_data for key in ['fio', 'birth_date', 'phone']):
+            # Все данные есть - переходим к подтверждению
+            user_states[chat_id_str] = {
+                'state': 'waiting_confirmation',
+                'data': user_data
+            }
+            await send_confirmation_message(event.bot, chat_id, user_data)
+        elif 'phone' not in user_data:
+            # Нет телефона - запрашиваем его
+            user_states[chat_id_str] = {
+                'state': 'waiting_phone',
+                'data': user_data
+            }
+            await request_phone_number(event.bot, chat_id)
+        else:
+            # Есть все данные - переходим к подтверждению
+            user_states[chat_id_str] = {
+                'state': 'waiting_confirmation',
+                'data': user_data
+            }
+            await send_confirmation_message(event.bot, chat_id, user_data)
 
     # --- Ожидание телефона ---
     elif state == 'waiting_phone':
@@ -511,12 +540,8 @@ async def handle_message(event: MessageCreated):
             )
             return
 
-        # Сохраняем телефон и переходим к подтверждению
+        # Сохраняем телефон
         user_data['phone'] = phone_normalized
-        user_states[chat_id_str] = {
-            'state': 'waiting_confirmation',
-            'data': user_data
-        }
 
         # Защита от дублирования
         current_time = time.time()
@@ -525,7 +550,12 @@ async def handle_message(event: MessageCreated):
                 return
         last_processed[chat_id_str] = current_time
 
-        await send_confirmation_message(event.bot, chat_id, user_data)
+        # Всегда переходим к подтверждению после ввода телефона
+        user_states[chat_id_str] = {
+            'state': 'waiting_confirmation',
+            'data': user_data
+        }
+        await send_confirmation_message(event.bot, chat_id, user_data)  # ← ОДИН ВЫЗОВ
 
 
 # --- Запуск вебхука ---

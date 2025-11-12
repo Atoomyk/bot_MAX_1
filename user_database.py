@@ -17,13 +17,21 @@ class UserDatabase:
                 chat_id TEXT PRIMARY KEY,
                 fio TEXT NOT NULL,
                 phone TEXT UNIQUE NOT NULL,
-                birth_date TEXT NOT NULL
+                birth_date TEXT NOT NULL,
+                registration_date TEXT NOT NULL
             )
         """)
 
         # Миграция: добавляем поле birth_date если его нет
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN birth_date TEXT")
+        except sqlite3.OperationalError:
+            # Поле уже существует
+            pass
+
+        # Миграция: добавляем поле registration_date если его нет
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN registration_date TEXT")
         except sqlite3.OperationalError:
             # Поле уже существует
             pass
@@ -75,9 +83,12 @@ class UserDatabase:
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         try:
+            # Получаем текущую дату и время в формате ГГГГ-ММ-ДД ЧЧ:ММ:СС
+            registration_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             cursor.execute(
-                "INSERT INTO users (chat_id, fio, phone, birth_date) VALUES (?, ?, ?, ?)",
-                (chat_id, fio, phone, birth_date)
+                "INSERT INTO users (chat_id, fio, phone, birth_date, registration_date) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, fio, phone, birth_date, registration_date)
             )
             conn.commit()
             success = True

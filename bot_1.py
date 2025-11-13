@@ -16,11 +16,14 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import AttachmentType
 
+# Импорт системы логирования
+from logging_config import setup_logging, log_user_event, log_bot_event, log_error, log_warning
+
 # Загрузка переменных окружения
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
-X_TUNNEL_URL = "https://1eca42f8-7ea0-48de-bcf6-939849243cab.tunnel4.com"
+X_TUNNEL_URL = "https://e831c50d-27db-4c09-bb1d-67660d588062.tunnel4.com"
 
 bot = Bot(TOKEN)
 dp = Dispatcher()
@@ -45,7 +48,7 @@ CONTACT_CENTER_URL = "https://sevmiac.ru/ekc/"
 MAP_OF_MEDICAL_INSTITUTIONS_URL = "https://yandex.ru/maps/959/sevastopol/search/%D0%B1%D0%BE%D0%BB%D1%8C%D0%BD%D0%B8%D1%86%D1%8B%20%D1%81%D0%B5%D0%B2%D0%B0%D1%81%D1%82%D0%BE%D0%BF%D0%BE%D0%BB%D1%8C/?ll=33.542596%2C44.577279&profile-mode=1&sctx=ZAAAAAgCEAAaKAoSCc0iFFtBJUNAEfYM4ZhlAUtAEhIJPgXAeAYN1z8RHCjwTj49wj8iBgABAgQFBigEOABAvwdIAWIaYWRkX3NuaXBwZXQ9bWV0YXJlYWx0eS8xLnhiHGFkZF9zbmlwcGV0PW1haW5fYXNwZWN0cy8xLnhiKXJlYXJyPXNjaGVtZV9Mb2NhbC9HZW8vTWV0YVJlYWx0eUtwcz0xMDAyagJydZUBAAAAAJ0BzczMPaABAagBAL0B09dLsMIBhwGI0oWYBI%2BevdYEmM%2BXmoAChf6Czky%2F3bm7BMGrr6oE1Oz6ngT91qOQtQK8ib%2FOiAXoteKRBMXVwJYEgcLQhgaczPbLBriO%2FskE1uOJgtoFkJjwtQaD48Tekgeq8ezXBq%2FLm%2BDCBMfokZuaA8nSo%2FkEiuHzlv8GktWn1IYB7bCdwuQF04y6xTmCAifQsdC%2B0LvRjNC90LjRhtGLINGB0LXQstCw0YHRgtC%2B0L%2FQvtC70YyKAiwxODQxMDU5NTYkMTg0MTA1OTU4JDUzNDM3MjYwNTU5JDE5ODM5NTI4OTU0MpICAzk1OZoCDGRlc2t0b3AtbWFwc6oCDDE2NTc0MjkxODkzOQ%3D%3D&sll=33.542596%2C44.577279&source=wizbiz_new_map_multi&sspn=0.240326%2C0.097050&z=13"
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 
 # Импорт базы данных из отдельного файла
 from user_database import db
@@ -117,6 +120,8 @@ async def start_fio_request(bot_instance: Bot, chat_id: int):
     """Начинает процесс регистрации - запрос ФИО"""
     user_states[str(chat_id)] = {'state': 'waiting_fio', 'data': {}}
 
+    # Логирование начала регистрации
+    log_user_event(str(chat_id), "registration started")
 
     # Первое сообщение
     await bot_instance.send_message(
@@ -132,8 +137,10 @@ async def start_fio_request(bot_instance: Bot, chat_id: int):
              'Пример: Иванов Иван Иванович'
     )
 
+
 async def request_fio_correction(bot_instance: Bot, chat_id: int):
     """Запрашивает ФИО для исправления (без сообщения о регистрации)"""
+    log_user_event(str(chat_id), "requested FIO correction")
     await bot_instance.send_message(
         chat_id=chat_id,
         text="Введите ваше ФИО для исправления:\n\n"
@@ -144,6 +151,7 @@ async def request_fio_correction(bot_instance: Bot, chat_id: int):
 
 async def request_birth_date_correction(bot_instance: Bot, chat_id: int):
     """Запрашивает дату рождения для исправления (без сообщения о регистрации)"""
+    log_user_event(str(chat_id), "requested birth date correction")
     await bot_instance.send_message(
         chat_id=chat_id,
         text="Введите вашу дату рождения для исправления:\n\n"
@@ -154,11 +162,13 @@ async def request_birth_date_correction(bot_instance: Bot, chat_id: int):
 
 async def request_phone_correction(bot_instance: Bot, chat_id: int):
     """Запрашивает телефон для исправления (без сообщения о регистрации)"""
+    log_user_event(str(chat_id), "requested phone correction")
     await bot_instance.send_message(
         chat_id=chat_id,
         text="Введите ваш номер телефона для исправления:\n\n"
              "Пример: +79781234567"
     )
+
 
 async def request_phone_number(bot_instance: Bot, chat_id: int):
     """Запрашивает номер телефона"""
@@ -169,6 +179,7 @@ async def request_phone_number(bot_instance: Bot, chat_id: int):
              "Пример: +79781234567\n\n"
     )
 
+
 # --- Обработчики событий ---
 
 @dp.bot_started()
@@ -176,6 +187,9 @@ async def bot_started(event: BotStarted):
     """Обработка запуска бота"""
     chat_id = event.chat_id
     chat_id_str = str(chat_id)
+
+    # Логирование события запуска бота
+    log_user_event(chat_id_str, "bot started")
 
     # Проверяем, не отправляли ли уже приветствие
     if chat_id_str in greeted_users:
@@ -186,9 +200,11 @@ async def bot_started(event: BotStarted):
         if db.is_user_registered(chat_id_str):
             # Пользователь уже зарегистрирован - показываем главное меню
             greeting_name = db.get_user_greeting(chat_id_str)
+            log_user_event(chat_id_str, "already registered, showing main menu")
             await send_main_menu(event.bot, chat_id, greeting_name)
         else:
             # Начинаем регистрацию
+            log_user_event(chat_id_str, "new user, starting registration")
             continue_button = CallbackButton(
                 text="Продолжить",
                 payload=CONTINUE_CALLBACK
@@ -217,7 +233,8 @@ async def bot_started(event: BotStarted):
 
         greeted_users.add(chat_id_str)
     except Exception as e:
-        logging.warning(f"Не удалось отправить сообщение пользователю {chat_id}: {e}")
+        log_error("Failed to send welcome message", f"User {chat_id}: {str(e)}")
+        log_warning("Message sending failed", f"User {chat_id}")
 
 
 async def request_birth_date(bot_instance: Bot, chat_id: int):
@@ -236,6 +253,9 @@ async def send_confirmation_message(bot_instance: Bot, chat_id: int, user_data: 
     fio = user_data.get('fio', 'Не указано')
     birth_date = user_data.get('birth_date', 'Не указано')
     phone = user_data.get('phone', 'Не указано')
+
+    # Логирование данных для подтверждения
+    log_user_event(str(chat_id), "showing confirmation", f"FIO: {fio}, Birth: {birth_date}, Phone: {phone}")
 
     # Создаем кнопки для исправления
     correct_fio_button = CallbackButton(
@@ -293,6 +313,9 @@ async def complete_registration(bot_instance: Bot, chat_id: int, user_data: dict
         # Получаем приветствие по имени и отчеству
         greeting_name = db.get_user_greeting(str(chat_id))
 
+        # Логирование успешной регистрации
+        log_user_event(str(chat_id), "registration completed successfully")
+
         # Отправляем сообщение об успешной регистрации
         await bot_instance.send_message(
             chat_id=chat_id,
@@ -306,6 +329,7 @@ async def complete_registration(bot_instance: Bot, chat_id: int, user_data: dict
     else:
         # Ошибка при сохранении
         user_states.pop(str(chat_id), None)
+        log_error("Registration failed - duplicate user", f"User {chat_id}, FIO: {fio}, Phone: {phone}")
         await bot_instance.send_message(
             chat_id=chat_id,
             text=f"🚨 Ошибка при регистрации. Комбинация ФИО и телефона уже существует.\n\n"
@@ -318,6 +342,9 @@ async def message_callback(event: MessageCallback):
     """Обработка нажатий на инлайн-кнопки"""
     chat_id = event.message.recipient.chat_id
     chat_id_str = str(chat_id)
+
+    # Логирование callback события
+    log_user_event(chat_id_str, "button pressed", f"Payload: {event.callback.payload}")
 
     # Защита от дублирования
     current_time = time.time()
@@ -335,13 +362,12 @@ async def message_callback(event: MessageCallback):
             processed_callbacks.clear()
 
     if event.callback.payload == CONTINUE_CALLBACK:
+        log_user_event(chat_id_str, "continue button pressed")
         await send_agreement_message(event.bot, chat_id)
 
-
     elif event.callback.payload == AGREEMENT_CALLBACK:
-
+        log_user_event(chat_id_str, "agreement accepted")
         await start_fio_request(event.bot, chat_id)
-
 
     # Обработка кнопок исправления данных
     elif event.callback.payload == CORRECT_FIO_CALLBACK:
@@ -349,45 +375,39 @@ async def message_callback(event: MessageCallback):
         current_data = user_states.get(chat_id_str, {}).get('data', {})
         current_data.pop('fio', None)  # Удаляем старое ФИО
         user_states[chat_id_str] = {'state': 'waiting_fio', 'data': current_data}
-        await request_fio_correction(event.bot, chat_id)  # ← НОВАЯ ФУНКЦИЯ
+        log_user_event(chat_id_str, "FIO correction requested")
+        await request_fio_correction(event.bot, chat_id)
 
     elif event.callback.payload == CORRECT_BIRTH_DATE_CALLBACK:
         # Сохраняем уже введенные данные кроме даты рождения
         current_data = user_states.get(chat_id_str, {}).get('data', {})
         current_data.pop('birth_date', None)  # Удаляем старую дату
         user_states[chat_id_str] = {'state': 'waiting_birth_date', 'data': current_data}
-        await request_birth_date_correction(event.bot, chat_id)  # ← НОВАЯ ФУНКЦИЯ
+        log_user_event(chat_id_str, "birth date correction requested")
+        await request_birth_date_correction(event.bot, chat_id)
 
     elif event.callback.payload == CORRECT_PHONE_CALLBACK:
         # Сохраняем уже введенные данные кроме телефона
         current_data = user_states.get(chat_id_str, {}).get('data', {})
         current_data.pop('phone', None)  # Удаляем старый телефон
         user_states[chat_id_str] = {'state': 'waiting_phone', 'data': current_data}
-        await request_phone_correction(event.bot, chat_id)  # ← НОВАЯ ФУНКЦИЯ
-
+        log_user_event(chat_id_str, "phone correction requested")
+        await request_phone_correction(event.bot, chat_id)
 
     elif event.callback.payload == CONFIRM_DATA_CALLBACK:
-
+        log_user_event(chat_id_str, "data confirmation requested")
         # Завершаем регистрацию
-
         user_data = user_states.get(chat_id_str, {}).get('data', {})
 
         if user_data and all(key in user_data for key in ['fio', 'birth_date', 'phone']):
-
             await complete_registration(event.bot, chat_id, user_data)
-
         else:
-
             # Если данных недостаточно, начинаем заново
-
+            log_error("Incomplete data on confirmation", f"User {chat_id_str}")
             await event.bot.send_message(
-
                 chat_id=chat_id,
-
                 text="❌ Не все данные заполнены. Начинаем регистрацию заново."
-
             )
-
             await start_fio_request(event.bot, chat_id)
 
 
@@ -420,6 +440,7 @@ async def handle_message(event: MessageCreated):
 
     # Если пользователь не зарегистрирован и не в процессе регистрации, игнорируем
     if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
+        log_user_event(chat_id_str, "message from unregistered user ignored")
         return
 
     # Проверяем состояние пользователя (процесс регистрации)
@@ -439,6 +460,7 @@ async def handle_message(event: MessageCreated):
             return
 
         if not db.validate_fio(message_text):
+            log_user_event(chat_id_str, "invalid FIO format", f"Input: {message_text}")
             await event.message.answer(
                 "❌ Ошибка формата!\n\n"
                 "Пожалуйста, введите ваше ФИО в таком формате: Фамилия Имя Отчество\n\n"
@@ -448,6 +470,7 @@ async def handle_message(event: MessageCreated):
 
         # Сохраняем ФИО
         user_data['fio'] = message_text
+        log_user_event(chat_id_str, "FIO entered", f"FIO: {message_text}")
 
         # Проверяем, все ли данные уже есть для подтверждения
         if all(key in user_data for key in ['fio', 'birth_date', 'phone']):
@@ -488,6 +511,7 @@ async def handle_message(event: MessageCreated):
             return
 
         if not db.validate_birth_date(message_text):
+            log_user_event(chat_id_str, "invalid birth date format", f"Input: {message_text}")
             await event.message.answer(
                 "❌ Ошибка формата!\n\n"
                 "Пожалуйста, введите дату рождения в формате: ДД.ММ.ГГГГ\n\n"
@@ -497,6 +521,7 @@ async def handle_message(event: MessageCreated):
 
         # Сохраняем дату рождения
         user_data['birth_date'] = message_text
+        log_user_event(chat_id_str, "birth date entered", f"Date: {message_text}")
 
         # Проверяем, все ли данные уже есть для подтверждения
         if all(key in user_data for key in ['fio', 'birth_date', 'phone']):
@@ -533,6 +558,7 @@ async def handle_message(event: MessageCreated):
         phone_normalized = message_text.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').strip()
 
         if not db.validate_phone(phone_normalized):
+            log_user_event(chat_id_str, "invalid phone format", f"Input: {message_text}")
             await event.message.answer(
                 "❌ Ошибка формата!\n\n"
                 "Пожалуйста, введите Ваш номер телефона в таком формате:\n"
@@ -543,6 +569,7 @@ async def handle_message(event: MessageCreated):
 
         # Сохраняем телефон
         user_data['phone'] = phone_normalized
+        log_user_event(chat_id_str, "phone entered", f"Phone: {phone_normalized}")
 
         # Защита от дублирования
         current_time = time.time()
@@ -556,14 +583,14 @@ async def handle_message(event: MessageCreated):
             'state': 'waiting_confirmation',
             'data': user_data
         }
-        await send_confirmation_message(event.bot, chat_id, user_data)  # ← ОДИН ВЫЗОВ
+        await send_confirmation_message(event.bot, chat_id, user_data)
 
 
 # --- Запуск вебхука ---
 
 async def setup_webhook():
     """Настраивает вебхук через Xtunnel"""
-    logging.info(f"Setting up webhook to URL: {X_TUNNEL_URL}")
+    log_bot_event("Setting up webhook", f"URL: {X_TUNNEL_URL}")
     await bot.subscribe_webhook(
         url=X_TUNNEL_URL,
         update_types=[
@@ -572,15 +599,18 @@ async def setup_webhook():
             "bot_started"
         ]
     )
-    logging.info("Webhook setup complete.")
+    log_bot_event("Webhook setup complete")
 
 
 async def main():
+    # Логирование запуска бота
+    log_bot_event("Bot starting")
+
     # Сначала настраиваем вебхук
     await setup_webhook()
 
     # Затем запускаем сервер
-    logging.info("Starting webhook server...")
+    log_bot_event("Starting webhook server")
     await dp.handle_webhook(
         bot=bot,
         host='0.0.0.0',
@@ -593,4 +623,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Bot stopped manually.")
+        log_bot_event("Bot stopped manually")
+    except Exception as e:
+        log_error("Bot crashed", f"Error: {str(e)}")
+        raise

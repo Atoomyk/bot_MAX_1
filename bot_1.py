@@ -23,12 +23,18 @@ from logging_config import setup_logging, log_user_event, log_bot_event, log_err
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
-X_TUNNEL_URL = "https://9fc111b4-5b69-4746-b9b0-f8e373db353a.tunnel4.com"
+# !!! ПАРАМЕТРЫ СЕРВЕРА, КОТОРЫЕ НУЖНО ЗАПОЛНИТЬ !!!
+
+# 1. ВНЕШНИЙ URL (домен или IP), который MAXAPI будет использовать для отправки запросов.
+WEBHOOK_EXTERNAL_URL = os.getenv("WEBHOOK_URL")
+
+# 2. ВНУТРЕННИЙ ПОРТ, который будет слушать процесс бота.
+WEBHOOK_LISTEN_PORT = 8083
 
 bot = Bot(TOKEN)
 dp = Dispatcher()
 
-SOGL_LINK = "https://sevmiac.ru/company/dokumenty/"
+SOGL_LINK = "https://sevmiac.ru/upload/iblock/d73/sttjnvlhg3j2df943ve0fv3husrlm8oj.pdf"
 CONTINUE_CALLBACK = "start_continue"
 AGREEMENT_CALLBACK = "agreement_accepted"
 ADMIN_CONTACT = "@admin_MIAC"
@@ -62,7 +68,6 @@ last_processed = {}
 
 
 # --- Вспомогательные функции ---
-
 def create_main_menu_keyboard():
     """Создает клавиатуру главного меню с 4 кнопками"""
     buttons = [
@@ -82,7 +87,6 @@ def create_main_menu_keyboard():
 
     return keyboard_attachment
 
-
 async def send_main_menu(bot_instance: Bot, chat_id: int, greeting_name: str):
     """Отправляет главное меню с приветствием"""
     keyboard = create_main_menu_keyboard()
@@ -93,7 +97,6 @@ async def send_main_menu(bot_instance: Bot, chat_id: int, greeting_name: str):
              "Выберите услугу:",
         attachments=[keyboard]
     )
-
 
 async def send_agreement_message(bot_instance: Bot, chat_id: int):
     """Отправляет сообщение с соглашением"""
@@ -114,7 +117,6 @@ async def send_agreement_message(bot_instance: Bot, chat_id: int):
              f'Ознакомиться с документом вы можете по ссылке {SOGL_LINK}',
         attachments=[keyboard_attachment]
     )
-
 
 async def start_fio_request(bot_instance: Bot, chat_id: int):
     """Начинает процесс регистрации - запрос ФИО"""
@@ -137,7 +139,6 @@ async def start_fio_request(bot_instance: Bot, chat_id: int):
              'Пример: Иванов Иван Иванович'
     )
 
-
 async def request_fio_correction(bot_instance: Bot, chat_id: int):
     """Запрашивает ФИО для исправления (без сообщения о регистрации)"""
     log_user_event(str(chat_id), "requested FIO correction")
@@ -147,7 +148,6 @@ async def request_fio_correction(bot_instance: Bot, chat_id: int):
              "Формат: Фамилия Имя Отчество\n"
              "Пример: Иванов Иван Иванович"
     )
-
 
 async def request_birth_date_correction(bot_instance: Bot, chat_id: int):
     """Запрашивает дату рождения для исправления (без сообщения о регистрации)"""
@@ -188,34 +188,24 @@ async def bot_started(event: BotStarted):
     chat_id = event.chat_id
     chat_id_str = str(chat_id)
 
-    # Логирование события запуска бота
     log_user_event(chat_id_str, "bot started")
 
-    # Проверяем, не отправляли ли уже приветствие
-    if chat_id_str in greeted_users:
-        return
-
     try:
-        # Проверяем, зарегистрирован ли пользователь
         if db.is_user_registered(chat_id_str):
-            # Пользователь уже зарегистрирован - показываем главное меню
             greeting_name = db.get_user_greeting(chat_id_str)
             log_user_event(chat_id_str, "already registered, showing main menu")
             await send_main_menu(event.bot, chat_id, greeting_name)
         else:
-            # Начинаем регистрацию
             log_user_event(chat_id_str, "new user, starting registration")
             continue_button = CallbackButton(
                 text="Продолжить",
                 payload=CONTINUE_CALLBACK
             )
-
             buttons_payload = ButtonsPayload(buttons=[[continue_button]])
             keyboard_attachment = Attachment(
                 type=AttachmentType.INLINE_KEYBOARD,
                 payload=buttons_payload
             )
-
             await event.bot.send_message(
                 chat_id=chat_id,
                 text='Здравствуйте! 👩‍⚕️\n\n'
@@ -226,15 +216,13 @@ async def bot_started(event: BotStarted):
                      '📌 Записаться на профилактический медосмотр/диспансеризацию;\n'
                      '📌 Прикрепиться к поликлинике;\n'
                      '📌 Получать уведомления о записи к врачу с возможностью её отмены;\n'
-                     '📌 Найти ближайшие государственные медицинские учреждения.'
-                ,
+                     '📌 Найти ближайшие государственные медицинские учреждения.',
                 attachments=[keyboard_attachment]
             )
-
-        greeted_users.add(chat_id_str)
     except Exception as e:
         log_error("Failed to send welcome message", f"User {chat_id}: {str(e)}")
         log_warning("Message sending failed", f"User {chat_id}")
+
 
 
 async def request_birth_date(bot_instance: Bot, chat_id: int):
@@ -430,7 +418,7 @@ async def handle_message(event: MessageCreated):
         return
     if message_id:
         processed_messages.add(message_id)
-        if len(processed_messages) > 1000:
+        if len(processed_messages) > 100:
             processed_messages.clear()
 
     message_text = event.message.body.text.strip()
@@ -445,7 +433,16 @@ async def handle_message(event: MessageCreated):
 
     # Проверяем состояние пользователя (процесс регистрации)
     state_info = user_states.get(chat_id_str)
+
     if not state_info:
+        # Пользователь зарегистрирован, но не в процессе регистрации
+        if db.is_user_registered(chat_id_str):
+            greeting_name = db.get_user_greeting(chat_id_str)
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text="✅ Вы уже в системе."
+            )
+            await send_main_menu(event.bot, chat_id, greeting_name)
         return
 
     state = state_info.get('state')
@@ -453,11 +450,6 @@ async def handle_message(event: MessageCreated):
 
     # --- Ожидание ФИО ---
     if state == 'waiting_fio':
-        if not message_text:
-            await event.message.answer(
-                "ФИО не может быть пустым. Пожалуйста, введите ваше ФИО в формате: Фамилия Имя Отчество"
-            )
-            return
 
         if not db.validate_fio(message_text):
             log_user_event(chat_id_str, "invalid FIO format", f"Input: {message_text}")
@@ -504,11 +496,6 @@ async def handle_message(event: MessageCreated):
 
     # --- Ожидание даты рождения ---
     elif state == 'waiting_birth_date':
-        if not message_text:
-            await event.message.answer(
-                "Дата рождения не может быть пустой. Пожалуйста, введите дату в формате: ДД.ММ.ГГГГ"
-            )
-            return
 
         if not db.validate_birth_date(message_text):
             log_user_event(chat_id_str, "invalid birth date format", f"Input: {message_text}")
@@ -548,11 +535,6 @@ async def handle_message(event: MessageCreated):
 
     # --- Ожидание телефона ---
     elif state == 'waiting_phone':
-        if not message_text:
-            await event.message.answer(
-                "Номер телефона не может быть пустым. Пожалуйста, введите Ваш номер телефона в формате: +79781111111"
-            )
-            return
 
         # Нормализуем телефон
         phone_normalized = message_text.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').strip()
@@ -587,12 +569,14 @@ async def handle_message(event: MessageCreated):
 
 
 # --- Запуск вебхука ---
-
 async def setup_webhook():
-    """Настраивает вебхук через Xtunnel"""
-    log_bot_event("Setting up webhook", f"URL: {X_TUNNEL_URL}")
+    if not WEBHOOK_EXTERNAL_URL:
+        log_error("Webhook setup failed", "WEBHOOK_URL not set in .env")
+        return
+
+    log_bot_event("Setting up webhook", f"URL: {WEBHOOK_EXTERNAL_URL}")
     await bot.subscribe_webhook(
-        url=X_TUNNEL_URL,
+        url=WEBHOOK_EXTERNAL_URL,
         update_types=[
             "message_created",
             "message_callback",
@@ -603,20 +587,21 @@ async def setup_webhook():
 
 
 async def main():
-    # Логирование запуска бота
-    log_bot_event("Bot starting")
+    try:
+        # Подписка на вебхук
+        await setup_webhook()
 
-    # Сначала настраиваем вебхук
-    await setup_webhook()
-
-    # Затем запускаем сервер
-    log_bot_event("Starting webhook server")
-    await dp.handle_webhook(
-        bot=bot,
-        host='0.0.0.0',
-        port=80,
-        log_level='info'
-    )
+        # Запуск сервера
+        logging.info(f"Запуск сервера на 0.0.0.0:{WEBHOOK_LISTEN_PORT}")
+        await dp.handle_webhook(
+            bot=bot,
+            host='0.0.0.0',
+            port=WEBHOOK_LISTEN_PORT,
+            log_level='critical'
+        )
+    finally:
+        # Корректное закрытие клиента
+        await bot.session.close()
 
 
 if __name__ == "__main__":

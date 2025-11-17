@@ -23,7 +23,7 @@ from logging_config import setup_logging, log_user_event, log_bot_event, log_err
 load_dotenv()
 TOKEN = os.getenv("MAXAPI_TOKEN")
 
-X_TUNNEL_URL = "https://e831c50d-27db-4c09-bb1d-67660d588062.tunnel4.com"
+X_TUNNEL_URL = "https://9fc111b4-5b69-4746-b9b0-f8e373db353a.tunnel4.com"
 
 bot = Bot(TOKEN)
 dp = Dispatcher()
@@ -289,8 +289,8 @@ async def send_confirmation_message(bot_instance: Bot, chat_id: int, user_data: 
     await bot_instance.send_message(
         chat_id=chat_id,
         text="📋 Пожалуйста, проверьте введенные данные:\n\n"
-             f"👤 ФИО: {fio}\n\n"
-             f"🎂 Дата рождения: {birth_date}\n\n"
+             f"👤 ФИО: {fio}\n"
+             f"🎂 Дата рождения: {birth_date}\n"
              f"📞 Телефон: {phone}\n\n"
              "Если всё верно - нажмите 'Подтвердить', "
              "или выберите что нужно исправить:",

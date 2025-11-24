@@ -519,11 +519,26 @@ async def bot_started(event: BotStarted):
 
     log_user_event(chat_id_str, "bot_started")
 
+    # Проверяем, не обрабатывали ли мы недавно это событие
+    current_time = time.time()
+    last_bot_start = processed_events.get(chat_id_str, {}).get('last_bot_start', 0)
+
+    # Если событие было менее 30 секунд назад - игнорируем
+    if current_time - last_bot_start < 30:
+        log_user_event(chat_id_str, "bot_started_ignored_duplicate")
+        return
+
+    # Сохраняем время обработки
+    if chat_id_str not in processed_events:
+        processed_events[chat_id_str] = {}
+    processed_events[chat_id_str]['last_bot_start'] = current_time
+
     try:
         if db.is_user_registered(chat_id_str):
             greeting_name = db.get_user_greeting(chat_id_str)
             log_user_event(chat_id_str, "already_registered")
-            await send_main_menu(event.bot, chat_id, greeting_name)
+            # НЕ отправляем главное меню, если пользователь уже в системе
+            # await send_main_menu(event.bot, chat_id, greeting_name)
         else:
             log_user_event(chat_id_str, "new_user_detected")
             keyboard = create_keyboard([[
@@ -537,7 +552,6 @@ async def bot_started(event: BotStarted):
             )
     except Exception as e:
         log_system_event("bot_started", "message_send_failed", error=str(e), chat_id=chat_id_str)
-
 
 @dp.message_callback()
 @anti_duplicate()

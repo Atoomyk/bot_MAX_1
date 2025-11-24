@@ -143,6 +143,20 @@ class UserDatabase:
             logging.warning(f"WARNING: Birth date validation failed - invalid date - Date: {date_str}")
             return False
 
+    def get_user_phone(self, chat_id: str) -> str:
+        """Получить телефон пользователя по chat_id"""
+        if not self.conn:
+            return "Не указан"
+
+        try:
+            self.cursor.execute("SELECT phone FROM users WHERE chat_id = %s", (chat_id,))
+            result = self.cursor.fetchone()
+            return result[0] if result else "Не указан"
+        except Exception as e:
+            logging.error(f"Ошибка получения телефона: {e}")
+            return "Не указан"
+
+
     def register_user(self, chat_id: str, fio: str, phone: str, birth_date: str) -> bool:
         """Регистрирует пользователя в базе данных."""
         if not self.conn:

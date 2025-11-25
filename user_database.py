@@ -6,6 +6,9 @@ from datetime import datetime
 import psycopg2
 from dotenv import load_dotenv
 
+# Настройка логгирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 load_dotenv()
 
 # --- Конфигурация PostgreSQL ---
@@ -65,7 +68,8 @@ class UserDatabase:
             logging.info("INFO: Таблица users проверена/создана.")
         except psycopg2.Error as e:
             logging.error(f"ERROR: Ошибка при инициализации таблицы users: {e}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
 
     def _add_column_if_not_exists(self, column_name: str, column_type: str):
         """Добавляет колонку в таблицу users, если она не существует."""
@@ -77,12 +81,16 @@ class UserDatabase:
             """
             self.cursor.execute(check_column_query, (column_name,))
             if not self.cursor.fetchone():
-                add_column_query = f"ALTER TABLE users ADD COLUMN {column_name} {column_type};"
+                # Безопасное добавление колонки
+                add_column_query = "ALTER TABLE users ADD COLUMN {} {}".format(
+                    column_name, column_type
+                )
                 self.cursor.execute(add_column_query)
                 logging.info(f"INFO: Добавлена колонка {column_name} в таблицу users.")
         except psycopg2.Error as e:
             logging.error(f"ERROR: Ошибка при добавлении колонки {column_name}: {e}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
 
     def is_user_registered(self, chat_id: str) -> bool:
         """Проверяет, зарегистрирован ли пользователь."""
@@ -115,33 +123,50 @@ class UserDatabase:
 
     def validate_fio(self, fio: str) -> bool:
         """Валидация ФИО: Фамилия Имя Отчество (кириллица, первая буква заглавная, разрешены дефисы в фамилии)."""
-        result = bool(re.match(r"^[А-ЯЁ][а-яё]+(-[А-ЯЁ][а-яё]+)? [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+$", fio))
+        # Убираем лишние пробелы
+        fio_cleaned = ' '.join(fio.split())
+        result = bool(re.match(r"^[А-ЯЁ][а-яё]+(-[А-ЯЁ][а-яё]+)? [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+$", fio_cleaned))
         if not result:
             logging.warning(f"WARNING: FIO validation failed - FIO: {fio}")
         return result
 
     def validate_phone(self, phone: str) -> bool:
         """Валидация телефона: формат +7XXXXXXXXXX."""
-        result = bool(re.match(r"^\+7\d{10}$", phone))
+        # Убираем все пробелы и дефисы
+        phone_cleaned = re.sub(r'[\s\-]', '', phone)
+        result = bool(re.match(r"^\+7\d{10}$", phone_cleaned))
         if not result:
             logging.warning(f"WARNING: Phone validation failed - Phone: {phone}")
         return result
 
     def validate_birth_date(self, date_str: str) -> bool:
-        """Проверка формата даты рождения: DD.MM.YYYY."""
+        """Проверка формата даты рождения: DD.MM.YYYY и возраст 18–150 лет."""
         # Проверяем формат
         if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", date_str):
             logging.warning(f"WARNING: Birth date validation failed - format - Date: {date_str}")
             return False
 
-        # Проверяем, что дата валидна
         try:
             day, month, year = map(int, date_str.split('.'))
-            datetime(year, month, day)
-            return True
+            birth_date = datetime(year, month, day)
         except ValueError:
             logging.warning(f"WARNING: Birth date validation failed - invalid date - Date: {date_str}")
             return False
+
+        # Проверяем, что дата не в будущем
+        today = datetime.today()
+        if birth_date > today:
+            logging.warning(f"WARNING: Birth date validation failed - future date - Date: {date_str}")
+            return False
+
+        # Проверяем возраст
+        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+
+        if age < 18 or age > 150:
+            logging.warning(f"WARNING: Birth date validation failed - age out of range ({age}) - Date: {date_str}")
+            return False
+
+        return True
 
     def get_user_phone(self, chat_id: str) -> str:
         """Получить телефон пользователя по chat_id"""
@@ -152,37 +177,52 @@ class UserDatabase:
             self.cursor.execute("SELECT phone FROM users WHERE chat_id = %s", (chat_id,))
             result = self.cursor.fetchone()
             return result[0] if result else "Не указан"
-        except Exception as e:
-            logging.error(f"Ошибка получения телефона: {e}")
+        except psycopg2.Error as e:
+            logging.error(f"ERROR: Ошибка получения телефона: {e}")
             return "Не указан"
 
+    def validate_user_data(self, fio: str, phone: str, birth_date: str) -> bool:
+        """Проверяет все данные пользователя перед регистрацией."""
+        return (self.validate_fio(fio) and
+                self.validate_phone(phone) and
+                self.validate_birth_date(birth_date))
 
     def register_user(self, chat_id: str, fio: str, phone: str, birth_date: str) -> bool:
         """Регистрирует пользователя в базе данных."""
         if not self.conn:
             return False
 
+        # Проверяем валидность данных перед регистрацией
+        if not self.validate_user_data(fio, phone, birth_date):
+            logging.error(f"ERROR: User registration failed - invalid data - User {chat_id}")
+            return False
+
         try:
             # Получаем текущую дату и время в формате ГГГГ-ММ-ДД ЧЧ:ММ:СС
             registration_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Очищаем телефон от пробелов и дефисов
+            phone_cleaned = re.sub(r'[\s\-]', '', phone)
 
             insert_query = """
             INSERT INTO users (chat_id, fio, phone, birth_date, registration_date) 
             VALUES (%s, %s, %s, %s, %s)
             """
-            self.cursor.execute(insert_query, (chat_id, fio, phone, birth_date, registration_date))
+            self.cursor.execute(insert_query, (chat_id, fio, phone_cleaned, birth_date, registration_date))
             self.conn.commit()
 
-            logging.info(f"User {chat_id}: user registered in database")
+            logging.info(f"INFO: User {chat_id}: user registered in database")
             return True
 
         except psycopg2.IntegrityError as e:
             logging.error(f"ERROR: User registration failed - duplicate - User {chat_id}, FIO: {fio}, Phone: {phone}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
             return False
         except psycopg2.Error as e:
             logging.error(f"ERROR: User registration failed - database error - User {chat_id}, Error: {str(e)}")
-            self.conn.rollback()
+            if self.conn:
+                self.conn.rollback()
             return False
 
     def close_connection(self):

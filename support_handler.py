@@ -129,22 +129,14 @@ class SupportHandler:
 
         # Возврат в главное меню
         from user_database import db
-        if db.is_user_registered(chat_id_str):
-            greeting_name = db.get_user_greeting(chat_id_str)
-            from bot_1_win11 import send_main_menu  # Или создай эту функцию доступной
-            await send_main_menu(bot, chat_id, greeting_name)
-        else:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="🔄 Возвращаюсь в главное меню..."
-            )
+        from bot_1 import send_main_menu
+        greeting_name = db.get_user_greeting(chat_id_str)
+        await send_main_menu(bot, chat_id, greeting_name)
 
         return success
 
-
 # Создадим экземпляр позже, после инициализации user_states
 support_handler = None
-
 
 def init_support_handler(user_states_dict):
     """Инициализация поддержки после создания user_states"""

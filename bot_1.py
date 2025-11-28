@@ -119,35 +119,49 @@ keepalive_task = None
 
 # --- УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ---
 
-def anti_duplicate(rate_limit=1.0):
-    """Декоратор для защиты от дублирования событий"""
+def anti_duplicate(rate_limit=0.8):
+    """Блокирует только повторные входящие события от пользователя,
+    но НЕ блокирует ответы бота внутри обработчика.
+    """
 
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+
             event = args[0] if args else None
             chat_id = None
 
-            # Получаем chat_id из разных типов событий
-            if hasattr(event, 'message') and hasattr(event.message, 'recipient'):
+            # Определяем chat_id из разных типов событий
+            if hasattr(event, "message") and hasattr(event.message, "recipient"):
                 chat_id = str(event.message.recipient.chat_id)
-            elif hasattr(event, 'chat_id'):
+            elif hasattr(event, "chat_id"):
                 chat_id = str(event.chat_id)
 
+            # Если chat_id не нашли — работаем как обычно
             if not chat_id:
                 return await func(*args, **kwargs)
 
-            # Проверяем частоту запросов
-            current_time = time.time()
-            if chat_id in processed_events:
-                last_time = processed_events[chat_id].get('last_time', 0)
-                if current_time - last_time < rate_limit:
-                    return
+            # 🔥 Определяем: сообщение от пользователя или от бота?
+            sender = None
+            if hasattr(event, "message") and hasattr(event.message, "sender"):
+                sender = event.message.sender
 
-            # Обновляем время последнего обработки
-            if chat_id not in processed_events:
-                processed_events[chat_id] = {}
-            processed_events[chat_id]['last_time'] = current_time
+            # Если событие сгенерировано ботом — не блокируем
+            # (обычно sender.is_bot == True)
+            if sender and getattr(sender, "is_bot", False):
+                return await func(*args, **kwargs)
+
+            # Теперь защищаем только входящие пользовательские события
+            current_time = time.time()
+            last_time = processed_events.get(chat_id, {}).get("last_time", 0)
+
+            # Проверка на анти-флуд
+            if current_time - last_time < rate_limit:
+                # Игнорируем ДУБЛИКАТЫ
+                return
+
+            # Обновляем время последнего события
+            processed_events.setdefault(chat_id, {})["last_time"] = current_time
 
             return await func(*args, **kwargs)
 
@@ -504,22 +518,19 @@ async def message_callback(event: MessageCallback):
 @dp.message_created()
 @anti_duplicate()
 async def handle_message(event: MessageCreated):
-    """Обработка всех текстовых сообщений"""
+    """Надёжная обработка всех входящих текстовых сообщений от пользователя."""
     try:
-        # Очистка старых событий при достижении лимита
-        if len(processed_events) > 1000:
-            cleanup_processed_events()
-
         chat_id = event.message.recipient.chat_id
         chat_id_str = str(chat_id)
 
-        # Проверяем базовые условия
+        # --- Базовые проверки ---
         if not event.message.body or not event.message.body.text:
+            # Обработка контакта (регистрация)
             if event.message.body and event.message.body.attachments:
-                # Обработка контактов через registration_handler
-                contact_processed = await registration_handler.process_contact_message(event, chat_id_str, chat_id)
-                if contact_processed:
-                    return
+                contact_processed = await registration_handler.process_contact_message(
+                    event, chat_id_str, chat_id
+                )
+                return
             return
 
         if not event.message.sender:
@@ -531,40 +542,40 @@ async def handle_message(event: MessageCreated):
 
         log_user_event(chat_id_str, "message_sent", text=message_text)
 
-        # Если пользователь не зарегистрирован и не в процессе регистрации, игнорируем
-        if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
-            log_user_event(chat_id_str, "message_ignored_unregistered")
+        # --- Проверяем состояние пользователя ---
+        state_info = user_states.get(chat_id_str, {})
+        state = state_info.get("state")
+
+        # --- CASE 1: ВЫПОЛНЯЕТСЯ ОБРАЩЕНИЕ В ПОДДЕРЖКУ ---
+        # Всегда имеет приоритет, НИКТО не перехватывает это сообщение
+        if state == "waiting_support_message":
+            await support_handler.process_support_message(event.bot, chat_id, message_text)
             return
 
-        # Пытаемся обработать сообщение как часть процесса регистрации
+        # --- CASE 2: ПОЛЬЗОВАТЕЛЬ В ПРОЦЕССЕ РЕГИСТРАЦИИ ---
+        # Здесь проверяем регистрацию строго перед обработкой "обычных" сообщений
         registration_processed = await registration_handler.process_text_input(
             chat_id_str, message_text, event.bot, chat_id
         )
-
         if registration_processed:
             return
 
-        # Если сообщение не обработано как часть регистрации, проверяем другие состояния
-        state_info = user_states.get(chat_id_str)
-        if not state_info:
-            if db.is_user_registered(chat_id_str):
-                greeting_name = db.get_user_greeting(chat_id_str)
-                await event.bot.send_message(chat_id=chat_id, text="✅ Вы уже в системе.")
-                await send_main_menu(event.bot, chat_id, greeting_name)
+        # --- CASE 3: ПОЛЬЗОВАТЕЛЬ НЕ ЗАРЕГИСТРИРОВАН ---
+        # Нельзя обрабатывать обычные сообщения — только меню регистрации
+        if not db.is_user_registered(chat_id_str):
+            log_user_event(chat_id_str, "message_ignored_unregistered")
             return
 
-        state = state_info.get('state')
-        user_data = state_info.get('data', {})
-
-        # Обработка состояния поддержки
-        if state == 'waiting_support_message':
-            await support_handler.process_support_message(event.bot, chat_id, message_text)
+        # --- CASE 4: ПОЛЬЗОВАТЕЛЬ ЗАРЕГИСТРИРОВАН И НЕ В СОСТОЯНИИ ---
+        # Он просто вводит что-то в пустое поле. Покажем главное меню
+        greeting_name = db.get_user_greeting(chat_id_str)
+        await event.bot.send_message(chat_id=chat_id, text="Выберите действие из меню ниже.")
+        await send_main_menu(event.bot, chat_id, greeting_name)
 
     except Exception as e:
-        chat_id_str = str(event.message.recipient.chat_id) if hasattr(event, 'message') and hasattr(event.message,
-                                                                                                    'recipient') else 'unknown'
-        log_system_event("message_handler_error", str(e), chat_id=chat_id_str)
-        user_states.pop(chat_id_str, None)
+        chat_id_err = str(event.message.recipient.chat_id) if hasattr(event, "message") else "unknown"
+        log_system_event("message_handler_error", str(e), chat_id=chat_id_err)
+        user_states.pop(chat_id_err, None)
 
 
 # --- ЗАПУСК ВЕБХУКА ---

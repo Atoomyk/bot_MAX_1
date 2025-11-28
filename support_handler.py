@@ -131,7 +131,7 @@ class SupportHandler:
         from user_database import db
         if db.is_user_registered(chat_id_str):
             greeting_name = db.get_user_greeting(chat_id_str)
-            from bot_1 import send_main_menu  # Или создай эту функцию доступной
+            from bot_1_win11 import send_main_menu  # Или создай эту функцию доступной
             await send_main_menu(bot, chat_id, greeting_name)
         else:
             await bot.send_message(

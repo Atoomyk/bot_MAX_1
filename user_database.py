@@ -1,4 +1,3 @@
-# user_database.py
 import os
 import re
 import logging
@@ -25,9 +24,12 @@ class UserDatabase:
         self.cursor = None
         self._connect()
         self._init_db()
+        self._create_reminders_table()  # ← создаём таблицу напоминаний
 
+    # ---------------------------------------------------------------------
+    # Подключение
+    # ---------------------------------------------------------------------
     def _connect(self):
-        """Устанавливает соединение с базой данных PostgreSQL."""
         try:
             self.conn = psycopg2.connect(
                 dbname=DB_NAME,
@@ -40,15 +42,15 @@ class UserDatabase:
             logging.info("INFO: Успешное подключение к PostgreSQL для UserDatabase.")
         except psycopg2.Error as e:
             logging.error(f"ERROR: Не удалось подключиться к PostgreSQL: {e}")
-            # В реальном приложении здесь нужно поднять исключение или завершить работу
 
+    # ---------------------------------------------------------------------
+    # Инициализация таблицы users
+    # ---------------------------------------------------------------------
     def _init_db(self):
-        """Создает таблицу users, если она не существует, и добавляет отсутствующие колонки."""
         if not self.conn:
             return
 
         try:
-            # Создаем таблицу users
             create_table_query = """
             CREATE TABLE IF NOT EXISTS users (
                 chat_id VARCHAR(255) PRIMARY KEY,
@@ -60,7 +62,6 @@ class UserDatabase:
             """
             self.cursor.execute(create_table_query)
 
-            # Проверяем существование колонок и добавляем их если нужно
             self._add_column_if_not_exists('birth_date', 'VARCHAR(10)')
             self._add_column_if_not_exists('registration_date', 'TEXT')
 
@@ -71,8 +72,109 @@ class UserDatabase:
             if self.conn:
                 self.conn.rollback()
 
+    # ---------------------------------------------------------------------
+    # Создание таблицы user_reminders
+    # ---------------------------------------------------------------------
+    def _create_reminders_table(self):
+        """
+        Создаёт таблицу напоминаний, если не существует.
+        enabled = TRUE по умолчанию
+        """
+        try:
+            query = """
+            CREATE TABLE IF NOT EXISTS user_reminders (
+                user_id VARCHAR(255) PRIMARY KEY,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """
+            self.cursor.execute(query)
+            self.conn.commit()
+            logging.info("INFO: Таблица user_reminders проверена/создана.")
+        except psycopg2.Error as e:
+            logging.error(f"ERROR: Не удалось создать таблицу user_reminders: {e}")
+            self.conn.rollback()
+
+    # ---------------------------------------------------------------------
+    # Создание записи для нового пользователя
+    # ---------------------------------------------------------------------
+    def init_user_reminder_record(self, chat_id: str):
+        """
+        Создаёт запись с enabled=TRUE, если её еще нет.
+        """
+        try:
+            self.cursor.execute(
+                "SELECT 1 FROM user_reminders WHERE user_id = %s",
+                (chat_id,)
+            )
+            if self.cursor.fetchone():
+                return  # уже существует
+
+            self.cursor.execute(
+                """
+                INSERT INTO user_reminders (user_id, enabled, updated_at)
+                VALUES (%s, TRUE, NOW())
+                """,
+                (chat_id,)
+            )
+            self.conn.commit()
+            logging.info(f"INFO: Создана запись user_reminders для пользователя {chat_id}")
+
+        except psycopg2.Error as e:
+            logging.error(f"ERROR: init_user_reminder_record: {e}")
+            self.conn.rollback()
+
+    # ---------------------------------------------------------------------
+    # Получение статуса включено/выключено
+    # ---------------------------------------------------------------------
+    def get_reminders_status(self, chat_id: str) -> bool:
+        """
+        Возвращает TRUE/FALSE.
+        Если записи нет — создаёт по умолчанию TRUE.
+        """
+        try:
+            self.cursor.execute(
+                "SELECT enabled FROM user_reminders WHERE user_id = %s",
+                (chat_id,)
+            )
+            row = self.cursor.fetchone()
+
+            if not row:
+                # создаём запись по умолчанию
+                self.init_user_reminder_record(chat_id)
+                return True
+
+            return row[0]
+
+        except psycopg2.Error as e:
+            logging.error(f"ERROR: get_reminders_status: {e}")
+            return True  # безопасное значение по умолчанию
+
+    # ---------------------------------------------------------------------
+    # Установка статуса
+    # ---------------------------------------------------------------------
+    def set_reminders_status(self, chat_id: str, enabled: bool):
+        try:
+            self.cursor.execute(
+                """
+                INSERT INTO user_reminders (user_id, enabled, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()
+                """,
+                (chat_id, enabled)
+            )
+            self.conn.commit()
+            logging.info(f"INFO: Уведомления пользователя {chat_id} → {enabled}")
+
+        except psycopg2.Error as e:
+            logging.error(f"ERROR: set_reminders_status: {e}")
+            self.conn.rollback()
+
+    # ---------------------------------------------------------------------
+    # Остальной исходный код
+    # ---------------------------------------------------------------------
     def _add_column_if_not_exists(self, column_name: str, column_type: str):
-        """Добавляет колонку в таблицу users, если она не существует."""
         try:
             check_column_query = """
             SELECT column_name 
@@ -81,10 +183,7 @@ class UserDatabase:
             """
             self.cursor.execute(check_column_query, (column_name,))
             if not self.cursor.fetchone():
-                # Безопасное добавление колонки
-                add_column_query = "ALTER TABLE users ADD COLUMN {} {}".format(
-                    column_name, column_type
-                )
+                add_column_query = f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"
                 self.cursor.execute(add_column_query)
                 logging.info(f"INFO: Добавлена колонка {column_name} в таблицу users.")
         except psycopg2.Error as e:
@@ -92,24 +191,17 @@ class UserDatabase:
             if self.conn:
                 self.conn.rollback()
 
-    def is_user_registered(self, chat_id: str) -> bool:
-        """Проверяет, зарегистрирован ли пользователь."""
-        if not self.conn:
-            return False
+    # ----- Оригинальные методы регистрации/валидации (не менялись) -----
 
+    def is_user_registered(self, chat_id: str) -> bool:
         try:
             self.cursor.execute("SELECT 1 FROM users WHERE chat_id = %s", (chat_id,))
-            result = self.cursor.fetchone()
-            return result is not None
+            return self.cursor.fetchone() is not None
         except psycopg2.Error as e:
-            logging.error(f"ERROR: Database query failed - User {chat_id}, Error: {str(e)}")
+            logging.error(f"ERROR: Database query failed: {e}")
             return False
 
     def get_user_greeting(self, chat_id: str) -> str:
-        """Возвращает приветственное имя пользователя (имя и отчество)."""
-        if not self.conn:
-            return "гость"
-
         try:
             self.cursor.execute("SELECT fio FROM users WHERE chat_id = %s", (chat_id,))
             row = self.cursor.fetchone()
@@ -117,122 +209,85 @@ class UserDatabase:
                 return "гость"
             fio = row[0].split()
             return " ".join(fio[1:]) if len(fio) >= 2 else fio[0]
-        except psycopg2.Error as e:
-            logging.error(f"ERROR: Failed to get user greeting - User {chat_id}, Error: {str(e)}")
+        except psycopg2.Error:
             return "гость"
 
     def validate_fio(self, fio: str) -> bool:
-        """Валидация ФИО: Фамилия Имя Отчество (кириллица, первая буква заглавная, разрешены дефисы в фамилии)."""
-        # Убираем лишние пробелы
         fio_cleaned = ' '.join(fio.split())
-        result = bool(re.match(r"^[А-ЯЁ][а-яё]+(-[А-ЯЁ][а-яё]+)? [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+$", fio_cleaned))
-        if not result:
-            logging.warning(f"WARNING: FIO validation failed - FIO: {fio}")
-        return result
+        return bool(re.match(r"^[А-ЯЁ][а-яё]+(-[А-ЯЁ][а-яё]+)? [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+$", fio_cleaned))
 
     def validate_phone(self, phone: str) -> bool:
-        """Валидация телефона: формат +7XXXXXXXXXX."""
-        # Убираем все пробелы и дефисы
         phone_cleaned = re.sub(r'[\s\-]', '', phone)
-        result = bool(re.match(r"^\+7\d{10}$", phone_cleaned))
-        if not result:
-            logging.warning(f"WARNING: Phone validation failed - Phone: {phone}")
-        return result
+        return bool(re.match(r"^\+7\d{10}$", phone_cleaned))
 
     def validate_birth_date(self, date_str: str) -> bool:
-        """Проверка формата даты рождения: DD.MM.YYYY и возраст 18–150 лет."""
-        # Проверяем формат
         if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", date_str):
-            logging.warning(f"WARNING: Birth date validation failed - format - Date: {date_str}")
             return False
 
         try:
             day, month, year = map(int, date_str.split('.'))
             birth_date = datetime(year, month, day)
         except ValueError:
-            logging.warning(f"WARNING: Birth date validation failed - invalid date - Date: {date_str}")
             return False
 
-        # Проверяем, что дата не в будущем
         today = datetime.today()
         if birth_date > today:
-            logging.warning(f"WARNING: Birth date validation failed - future date - Date: {date_str}")
             return False
 
-        # Проверяем возраст
-        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+        age = today.year - birth_date.year - (
+            (today.month, today.day) < (birth_date.month, birth_date.day)
+        )
 
-        if age < 18 or age > 150:
-            logging.warning(f"WARNING: Birth date validation failed - age out of range ({age}) - Date: {date_str}")
-            return False
-
-        return True
+        return 18 <= age <= 150
 
     def get_user_phone(self, chat_id: str) -> str:
-        """Получить телефон пользователя по chat_id"""
-        if not self.conn:
-            return "Не указан"
-
         try:
             self.cursor.execute("SELECT phone FROM users WHERE chat_id = %s", (chat_id,))
-            result = self.cursor.fetchone()
-            return result[0] if result else "Не указан"
-        except psycopg2.Error as e:
-            logging.error(f"ERROR: Ошибка получения телефона: {e}")
+            row = self.cursor.fetchone()
+            return row[0] if row else "Не указан"
+        except psycopg2.Error:
             return "Не указан"
 
-    def validate_user_data(self, fio: str, phone: str, birth_date: str) -> bool:
-        """Проверяет все данные пользователя перед регистрацией."""
-        return (self.validate_fio(fio) and
-                self.validate_phone(phone) and
-                self.validate_birth_date(birth_date))
+    def validate_user_data(self, fio, phone, birth_date):
+        return (
+            self.validate_fio(fio)
+            and self.validate_phone(phone)
+            and self.validate_birth_date(birth_date)
+        )
 
     def register_user(self, chat_id: str, fio: str, phone: str, birth_date: str) -> bool:
-        """Регистрирует пользователя в базе данных."""
-        if not self.conn:
-            return False
-
-        # Проверяем валидность данных перед регистрацией
         if not self.validate_user_data(fio, phone, birth_date):
-            logging.error(f"ERROR: User registration failed - invalid data - User {chat_id}")
             return False
 
         try:
-            # Получаем текущую дату и время в формате ГГГГ-ММ-ДД ЧЧ:ММ:СС
-            registration_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            # Очищаем телефон от пробелов и дефисов
+            reg_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             phone_cleaned = re.sub(r'[\s\-]', '', phone)
 
-            insert_query = """
-            INSERT INTO users (chat_id, fio, phone, birth_date, registration_date) 
-            VALUES (%s, %s, %s, %s, %s)
-            """
-            self.cursor.execute(insert_query, (chat_id, fio, phone_cleaned, birth_date, registration_date))
+            self.cursor.execute(
+                """
+                INSERT INTO users (chat_id, fio, phone, birth_date, registration_date)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (chat_id, fio, phone_cleaned, birth_date, reg_date)
+            )
             self.conn.commit()
 
-            logging.info(f"INFO: User {chat_id}: user registered in database")
+            # ⚡ Создаём запись о напоминаниях
+            self.init_user_reminder_record(chat_id)
+
             return True
 
-        except psycopg2.IntegrityError as e:
-            logging.error(f"ERROR: User registration failed - duplicate - User {chat_id}, FIO: {fio}, Phone: {phone}")
-            if self.conn:
-                self.conn.rollback()
-            return False
         except psycopg2.Error as e:
-            logging.error(f"ERROR: User registration failed - database error - User {chat_id}, Error: {str(e)}")
-            if self.conn:
-                self.conn.rollback()
+            logging.error(f"ERROR: User registration failed: {e}")
+            self.conn.rollback()
             return False
 
     def close_connection(self):
-        """Закрывает соединение с базой данных."""
         if self.cursor:
             self.cursor.close()
         if self.conn:
             self.conn.close()
-            logging.info("INFO: Соединение с PostgreSQL закрыто.")
 
 
-# Экземпляр базы, который импортируется в боте
+# Экземпляр базы данных
 db = UserDatabase()

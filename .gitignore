@@ -66,6 +66,8 @@ logs/
 .DS_Store
 Thumbs.db
 
+tickets
+.json
 
 =======
 share/python-wheels/

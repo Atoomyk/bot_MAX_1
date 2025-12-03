@@ -20,9 +20,9 @@ class ReminderHandler:
     # ---------------------------------------------------------------------
     def _create_reminders_keyboard(self):
         buttons = [
-            [CallbackButton(text="Да", payload="reminders_yes")],
-            [CallbackButton(text="Нет", payload="reminders_no")],
-            [CallbackButton(text="⬅ Назад", payload="reminders_back")]
+            [CallbackButton(text="✅ Да", payload="reminders_yes")],
+            [CallbackButton(text="❌ Нет", payload="reminders_no")],
+            [CallbackButton(text="⬅️ Назад", payload="reminders_back")]
         ]
 
         payload = ButtonsPayload(buttons=buttons)
@@ -37,11 +37,11 @@ class ReminderHandler:
         Да / Нет / Назад
         """
         status = self.db.get_reminders_status(str(chat_id))
-        status_text = "включены" if status else "отключены"
+        status_text = "ВКЛЮЧЕНЫ" if status else "ОТКЛЮЧЕНЫ"
 
         text = (
             "Хотите получать напоминания о записях к врачу?\n"
-            f"Сейчас уведомления **{status_text}**."
+            f"Сейчас уведомления *{status_text}*."
         )
 
         await bot.send_message(

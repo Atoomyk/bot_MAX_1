@@ -1,6 +1,6 @@
-# bot.py
-import asyncio
+# bot_1_win11.py
 import os
+import asyncio
 import time
 import re
 import aiohttp
@@ -27,6 +27,11 @@ from reminder_handler import ReminderHandler
 # Импорт системы логирования
 from logging_config import setup_logging, log_user_event, log_system_event, log_data_event, log_security_event
 
+# Импорт модуля синхронизации записей
+from sync_appointments.service import SyncService
+from sync_appointments.scheduler import SchedulerManager
+from commands.sync_command import SyncCommandHandler
+
 # Настройка логирования
 setup_logging()
 
@@ -37,6 +42,14 @@ WEBHOOK_MODE = os.getenv("WEBHOOK_MODE", "xtunnel")  # xtunnel или direct
 XTUNNEL_URL = os.getenv("XTUNNEL_URL")
 DIRECT_WEBHOOK_URL = os.getenv("DIRECT_WEBHOOK_URL")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8083"))
+
+# ID администратора для чата поддержки и управления синхронизацией
+ADMIN_ID = os.getenv("ADMIN_ID")
+if ADMIN_ID:
+    ADMIN_ID = int(ADMIN_ID)
+
+# URL внешней системы МИС
+MIS_API_URL = os.getenv("MIS_API_URL")
 
 # Определение URL вебхука в зависимости от режима
 if WEBHOOK_MODE == "direct" and DIRECT_WEBHOOK_URL:
@@ -72,11 +85,43 @@ from user_database import db
 user_states = {}
 processed_events = {}  # Объединенная защита от дублирования
 
+# Глобальные переменные для синхронизации записей
+sync_service = None
+sync_command_handler = None
+scheduler_manager = None
+
+
+def init_sync_service():
+    """Инициализирует сервис синхронизации записей"""
+    global sync_service, sync_command_handler, scheduler_manager
+
+    try:
+
+        if MIS_API_URL and ADMIN_ID:
+            sync_service = SyncService(db, bot, MIS_API_URL)
+            scheduler_manager = SchedulerManager(sync_service)
+            sync_command_handler = SyncCommandHandler(sync_service, int(ADMIN_ID))
+            log_system_event("sync", "service_initialized", url=MIS_API_URL)
+        else:
+            reason = ""
+            if not MIS_API_URL:
+                reason += "MIS_API_URL отсутствует "
+            if not ADMIN_ID:
+                reason += "ADMIN_ID отсутствует "
+            log_system_event("sync", "init_skipped", reason=reason.strip())
+    except Exception as e:
+        log_system_event("sync", "init_error", error=str(e))
+
 # Инициализация обработчиков
 support_handler = init_support_handler(user_states)
 registration_handler = RegistrationHandler(user_states)  # Новый обработчик регистрации
 # === Инициализация обработчика напоминаний ===
 reminder_handler = ReminderHandler(db, None)
+
+# Устанавливаем бот в support_handler для отправки уведомлений
+support_handler.set_bot(bot)
+
+reminder_handler.send_other_options_menu = lambda bot_instance, chat_id: send_other_options_menu(bot_instance, chat_id)
 
 
 # --- ФУНКЦИИ ДЛЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ ---
@@ -90,7 +135,7 @@ async def make_keepalive_request(session):
                 log_system_event("keepalive", "success", status=response.status)
             else:
                 log_system_event("keepalive", "failed", status=response.status,
-                               response_text=await response.text())
+                                 response_text=await response.text())
     except Exception as e:
         log_system_event("keepalive", "error", error=str(e))
 
@@ -113,55 +158,50 @@ async def keepalive_worker():
                 await asyncio.sleep(300)
 
 
-# Глобальная переменная для хранения задачи keepalive
+async def chat_cleanup_worker():
+    """Фоновая задача для очистки чатов поддержки"""
+    try:
+        await support_handler.start_cleanup_task()
+    except Exception as e:
+        log_system_event("chat_cleanup", "start_error", error=str(e))
+
+
+# Глобальные переменные для хранения задач
 keepalive_task = None
+chat_cleanup_task = None
 
 
 # --- УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ---
 
-def anti_duplicate(rate_limit=0.8):
-    """Блокирует только повторные входящие события от пользователя,
-    но НЕ блокирует ответы бота внутри обработчика.
-    """
+def anti_duplicate(rate_limit=1.0):
+    """Декоратор для защиты от дублирования событий"""
 
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-
             event = args[0] if args else None
             chat_id = None
 
-            # Определяем chat_id из разных типов событий
-            if hasattr(event, "message") and hasattr(event.message, "recipient"):
+            # Получаем chat_id из разных типов событий
+            if hasattr(event, 'message') and hasattr(event.message, 'recipient'):
                 chat_id = str(event.message.recipient.chat_id)
-            elif hasattr(event, "chat_id"):
+            elif hasattr(event, 'chat_id'):
                 chat_id = str(event.chat_id)
 
-            # Если chat_id не нашли — работаем как обычно
             if not chat_id:
                 return await func(*args, **kwargs)
 
-            # 🔥 Определяем: сообщение от пользователя или от бота?
-            sender = None
-            if hasattr(event, "message") and hasattr(event.message, "sender"):
-                sender = event.message.sender
-
-            # Если событие сгенерировано ботом — не блокируем
-            # (обычно sender.is_bot == True)
-            if sender and getattr(sender, "is_bot", False):
-                return await func(*args, **kwargs)
-
-            # Теперь защищаем только входящие пользовательские события
+            # Проверяем частоту запросов
             current_time = time.time()
-            last_time = processed_events.get(chat_id, {}).get("last_time", 0)
+            if chat_id in processed_events:
+                last_time = processed_events[chat_id].get('last_time', 0)
+                if current_time - last_time < rate_limit:
+                    return
 
-            # Проверка на анти-флуд
-            if current_time - last_time < rate_limit:
-                # Игнорируем ДУБЛИКАТЫ
-                return
-
-            # Обновляем время последнего события
-            processed_events.setdefault(chat_id, {})["last_time"] = current_time
+            # Обновляем время последнего обработки
+            if chat_id not in processed_events:
+                processed_events[chat_id] = {}
+            processed_events[chat_id]['last_time'] = current_time
 
             return await func(*args, **kwargs)
 
@@ -342,8 +382,9 @@ def create_other_options_keyboard():
     buttons_config = [
         [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': MAP_OF_MEDICAL_INSTITUTIONS_URL}],
         [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': CONTACT_CENTER_URL}],
-        [{'type': 'callback', 'text': '🔔 Вкл/откл напоминаний', 'payload': "toggle_reminders"}],
-        [{'type': 'callback', 'text': '✉️ Написать в поддержку', 'payload': "support_request"}],
+        [{'type': 'callback', 'text': '🔔 Настройки напоминаний', 'payload': "reminders_settings"}],
+        [{'type': 'callback', 'text': '📋 Мои записи к врачу', 'payload': "view_my_appointments"}],
+        [{'type': 'callback', 'text': '💬 Онлайн чат с поддержкой', 'payload': "support_request"}],
         [{'type': 'callback', 'text': '⬅️ Назад', 'payload': "back_to_main"}]
     ]
     return create_keyboard(buttons_config)
@@ -364,8 +405,9 @@ async def send_other_options_menu(bot_instance: Bot, chat_id: int):
     keyboard = create_keyboard([
         [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': MAP_OF_MEDICAL_INSTITUTIONS_URL}],
         [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': CONTACT_CENTER_URL}],
-        [{'type': 'callback', 'text': '🔔 Вкл/откл напоминаний', 'payload': "reminders_settings"}],
-        [{'type': 'callback', 'text': '✉️ Написать в поддержку', 'payload': "support_request"}],
+        [{'type': 'callback', 'text': '🔔 Настройки напоминаний', 'payload': "reminders_settings"}],
+        [{'type': 'callback', 'text': '📋 Мои записи к врачу', 'payload': "view_my_appointments"}],
+        [{'type': 'callback', 'text': '💬 Онлайн чат с поддержкой', 'payload': "support_request"}],
         [{'type': 'callback', 'text': '⬅️ Назад', 'payload': "back_to_main"}]
     ])
     await bot_instance.send_message(
@@ -439,6 +481,54 @@ async def message_callback(event: MessageCallback):
 
         log_user_event(chat_id_str, "button_pressed", payload=payload)
 
+        # === Обработка callback-ов для записей к врачу ===
+        if payload.startswith("view_appointment:"):
+            # Просмотр деталей конкретной записи
+            try:
+                appointment_id = int(payload.split(":")[1])
+                if sync_service and sync_service.notifier:
+                    await sync_service.notifier.send_appointment_details(chat_id, appointment_id)
+                else:
+                    await event.bot.send_message(
+                        chat_id=chat_id,
+                        text="Сервис записей временно недоступен. Пожалуйста, попробуйте позже."
+                    )
+            except (ValueError, IndexError):
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="Ошибка при обработке запроса. Пожалуйста, попробуйте еще раз."
+                )
+            return
+
+        elif payload == "view_appointments_list":
+            # Просмотр списка всех записей
+            if sync_service and sync_service.notifier:
+                await sync_service.notifier.send_appointments_list(chat_id)
+            else:
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="Сервис записей временно недоступен. Пожалуйста, попробуйте позже."
+                )
+            return
+
+        elif payload.startswith("cancel_appointment:"):
+            # Заглушка для отмены записи
+            if payload == "cancel_appointment:stub":
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="⏳ Функция отмены записи в настоящее время недоступна.\n\n"
+                         "Для отмены записи обратитесь в регистратуру медицинского учреждения "
+                         "или воспользуйтесь порталом Госуслуги."
+                )
+            return
+
+        # === Обработка админских callback для синхронизации ===
+        if sync_command_handler and chat_id == ADMIN_ID:
+            if payload.startswith("sync_"):
+                handled = await sync_command_handler.handle_callback(event, payload)
+                if handled:
+                    return
+
         # Обработка callback-ов регистрации
         if payload == "start_continue":
             await registration_handler.send_agreement_message(event.bot, chat_id)
@@ -470,8 +560,18 @@ async def message_callback(event: MessageCallback):
             await send_other_options_menu(event.bot, chat_id)
 
         elif payload == "back_to_main":
-            greeting_name = db.get_user_greeting(chat_id_str)
-            await send_main_menu(event.bot, chat_id, greeting_name)
+            if db.is_user_registered(chat_id_str):
+                greeting_name = db.get_user_greeting(chat_id_str)
+                await send_main_menu(event.bot, chat_id, greeting_name)
+            else:
+                keyboard = create_keyboard([[
+                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+                ]])
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="Для использования бота необходимо зарегистрироваться.",
+                    attachments=[keyboard] if keyboard else []
+                )
 
         # === Управление напоминаниями ===
         elif payload == "reminders_settings":
@@ -490,13 +590,31 @@ async def message_callback(event: MessageCallback):
             await reminder_handler.go_back(event.bot, chat_id)
             return
 
+        # === Онлайн чат с поддержкой ===
         elif payload == "support_request":
             chat_id_str = str(chat_id)
             if db.is_user_registered(chat_id_str):
+                # Получаем данные пользователя
+                greeting_name = db.get_user_greeting(chat_id_str)
+                user_phone = ""
+
+                # Пытаемся получить телефон из базы данных
+                try:
+                    if hasattr(db, 'get_user_phone'):
+                        user_phone = db.get_user_phone(chat_id_str)
+                    else:
+                        # Альтернативный способ получения телефона
+                        user_data = db.get_user_data(chat_id_str)
+                        user_phone = user_data.get('phone', '') if user_data else ''
+                except:
+                    user_phone = "Не указан"
+
                 user_data = {
-                    'fio': db.get_user_greeting(chat_id_str),
-                    'phone': db.get_user_phone(chat_id_str) if hasattr(db, 'get_user_phone') else "Не указан"
+                    'fio': greeting_name,
+                    'phone': user_phone
                 }
+
+                # Запускаем онлайн чат
                 await support_handler.handle_support_request(event.bot, chat_id, user_data)
             else:
                 # Для незарегистрированных пользователей предлагаем начать регистрацию
@@ -505,7 +623,27 @@ async def message_callback(event: MessageCallback):
                 ]])
                 await event.bot.send_message(
                     chat_id=chat_id,
-                    text="❌ Для обращения в поддержку необходимо сначала зарегистрироваться.",
+                    text="❌ Для использования онлайн-чата с поддержкой необходимо сначала зарегистрироваться.",
+                    attachments=[keyboard] if keyboard else []
+                )
+
+        # === Просмотр записей к врачу ===
+        elif payload == "view_my_appointments":
+            if db.is_user_registered(chat_id_str):
+                if sync_service and sync_service.notifier:
+                    await sync_service.notifier.send_appointments_list(chat_id)
+                else:
+                    await event.bot.send_message(
+                        chat_id=chat_id,
+                        text="Сервис записей к врачу временно недоступен. Пожалуйста, попробуйте позже."
+                    )
+            else:
+                keyboard = create_keyboard([[
+                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+                ]])
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="Для просмотра записей к врачу необходимо зарегистрироваться.",
                     attachments=[keyboard] if keyboard else []
                 )
 
@@ -513,27 +651,73 @@ async def message_callback(event: MessageCallback):
         log_system_event("callback_error", str(e), chat_id=chat_id_str)
         # Удаляем состояние при ошибке
         user_states.pop(chat_id_str, None)
+        # Отправляем сообщение об ошибке пользователю
+        try:
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text="Произошла ошибка при обработке запроса. Пожалуйста, попробуйте еще раз."
+            )
+        except:
+            pass
 
 
 @dp.message_created()
 @anti_duplicate()
 async def handle_message(event: MessageCreated):
-    """Надёжная обработка всех входящих текстовых сообщений от пользователя."""
+    """Обработка всех текстовых сообщений"""
     try:
+        # Очистка старых событий при достижении лимита
+        if len(processed_events) > 1000:
+            cleanup_processed_events()
+
         chat_id = event.message.recipient.chat_id
         chat_id_str = str(chat_id)
 
-        # --- Базовые проверки ---
-        if not event.message.body or not event.message.body.text:
-            # Обработка контакта (регистрация)
-            if event.message.body and event.message.body.attachments:
-                contact_processed = await registration_handler.process_contact_message(
-                    event, chat_id_str, chat_id
-                )
+        # Проверяем, является ли отправитель администратором
+        is_admin = (chat_id == ADMIN_ID) if ADMIN_ID else False
+
+        # === Обработка админских команд для синхронизации ===
+        if is_admin and sync_command_handler:
+            print(f"DEBUG ADMIN: Получено сообщение от админа: chat_id={chat_id}")
+            if event.message.body and event.message.body.text:
+                message_text = event.message.body.text.strip()
+                print(f"DEBUG ADMIN: Текст сообщения: '{message_text}'")
+
+                # Обрабатываем команды синхронизации
+                handled = await sync_command_handler.handle_message(event)
+                if handled:
+                    return
+                else:
+                    print(f"DEBUG ADMIN: Команда НЕ обработана sync_command_handler")
+
+                # Если это администратор, обрабатываем его сообщения через support_handler
+                if is_admin:
+                    if event.message.body and event.message.body.text:
+                        message_text = event.message.body.text.strip()
+
+                        # Обрабатываем сообщение администратора
+                        processed = await support_handler.process_admin_message(event.bot, chat_id, message_text)
+                        if processed:
+                            return
+
+        # ВАЖНО: Проверяем тело сообщения ДО проверки текста
+        if not event.message.body:
+            return  # Если нет тела сообщения, выходим
+
+        # ВАЖНО: Проверяем наличие вложений (контактов) В ПЕРВУЮ ОЧЕРЕДЬ
+        if event.message.body.attachments:
+            contact_processed = await registration_handler.process_contact_message(
+                event, chat_id_str, chat_id
+            )
+            if contact_processed:
                 return
+
+        # Продолжаем проверку остальных условий
+        if not event.message.sender:
             return
 
-        if not event.message.sender:
+        # Получаем текст сообщения
+        if not event.message.body.text:
             return
 
         message_text = event.message.body.text.strip()
@@ -542,60 +726,192 @@ async def handle_message(event: MessageCreated):
 
         log_user_event(chat_id_str, "message_sent", text=message_text)
 
-        # --- Проверяем состояние пользователя ---
-        state_info = user_states.get(chat_id_str, {})
-        state = state_info.get("state")
-
-        # --- CASE 1: ВЫПОЛНЯЕТСЯ ОБРАЩЕНИЕ В ПОДДЕРЖКУ ---
-        # Всегда имеет приоритет, НИКТО не перехватывает это сообщение
-        if state == "waiting_support_message":
-            await support_handler.process_support_message(event.bot, chat_id, message_text)
+        # Если пользователь не зарегистрирован и не в процессе регистрации, игнорируем
+        if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
+            log_user_event(chat_id_str, "message_ignored_unregistered")
+            # Предлагаем начать регистрацию
+            keyboard = create_keyboard([[
+                {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+            ]])
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text="Для использования бота необходимо зарегистрироваться.",
+                attachments=[keyboard] if keyboard else []
+            )
             return
 
-        # --- CASE 2: ПОЛЬЗОВАТЕЛЬ В ПРОЦЕССЕ РЕГИСТРАЦИИ ---
-        # Здесь проверяем регистрацию строго перед обработкой "обычных" сообщений
+        # Пытаемся обработать сообщение как часть процесса регистрации
         registration_processed = await registration_handler.process_text_input(
             chat_id_str, message_text, event.bot, chat_id
         )
+
         if registration_processed:
             return
 
-        # --- CASE 3: ПОЛЬЗОВАТЕЛЬ НЕ ЗАРЕГИСТРИРОВАН ---
-        # Нельзя обрабатывать обычные сообщения — только меню регистрации
-        if not db.is_user_registered(chat_id_str):
-            log_user_event(chat_id_str, "message_ignored_unregistered")
+        # Проверяем, находится ли пользователь в онлайн-чате
+        chat_processed = await support_handler.process_user_message(event.bot, chat_id, message_text)
+        if chat_processed:
             return
 
-        # --- CASE 4: ПОЛЬЗОВАТЕЛЬ ЗАРЕГИСТРИРОВАН И НЕ В СОСТОЯНИИ ---
-        # Он просто вводит что-то в пустое поле. Покажем главное меню
-        greeting_name = db.get_user_greeting(chat_id_str)
-        await event.bot.send_message(chat_id=chat_id, text="Выберите действие из меню ниже.")
-        await send_main_menu(event.bot, chat_id, greeting_name)
+        # Если пользователь запросил свои записи
+        if message_text.lower() in ["мои записи", "записи", "записи к врачу"]:
+            if db.is_user_registered(chat_id_str):
+                if sync_service and sync_service.notifier:
+                    await sync_service.notifier.send_appointments_list(chat_id)
+                else:
+                    await event.bot.send_message(
+                        chat_id=chat_id,
+                        text="Сервис записей к врачу временно недоступен. Пожалуйста, попробуйте позже."
+                    )
+            else:
+                keyboard = create_keyboard([[
+                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+                ]])
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="Для просмотра записей к врачу необходимо зарегистрироваться.",
+                    attachments=[keyboard] if keyboard else []
+                )
+            return
+
+        # Если сообщение не обработано как часть регистрации или чата,
+        # и пользователь зарегистрирован - отправляем главное меню
+        if db.is_user_registered(chat_id_str):
+            greeting_name = db.get_user_greeting(chat_id_str)
+            await send_main_menu(event.bot, chat_id, greeting_name)
+            return
+
+        # Если пользователь не зарегистрирован и не в процессе регистрации,
+        # и не в чате - предлагаем начать регистрацию
+        if not user_states.get(chat_id_str):
+            keyboard = create_keyboard([[
+                {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+            ]])
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text="Для использования бота необходимо зарегистрироваться.",
+                attachments=[keyboard] if keyboard else []
+            )
 
     except Exception as e:
-        chat_id_err = str(event.message.recipient.chat_id) if hasattr(event, "message") else "unknown"
-        log_system_event("message_handler_error", str(e), chat_id=chat_id_err)
-        user_states.pop(chat_id_err, None)
+        chat_id_str = str(event.message.recipient.chat_id) if hasattr(event, 'message') and hasattr(event.message,
+                                                                                                    'recipient') else 'unknown'
+        log_system_event("message_handler_error", str(e), chat_id=chat_id_str)
+        user_states.pop(chat_id_str, None)
+
+        # Отправляем сообщение об ошибке пользователю
+        try:
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text="Произошла ошибка при обработке сообщения. Пожалуйста, попробуйте еще раз."
+            )
+        except:
+            pass
+
+
+async def send_pending_notifications():
+    """Отправляет ожидающие уведомления пользователям и админу"""
+    try:
+        # Отправляем уведомления пользователям
+        for user_id, chat_info in list(support_handler.active_chats.items()):
+            if 'pending_notification' in chat_info:
+                notification = chat_info['pending_notification']
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=notification
+                    )
+                    # Удаляем отправленное уведомление
+                    del chat_info['pending_notification']
+                except Exception as e:
+                    log_system_event("support_chat", "send_notification_error",
+                                     error=str(e), user_id=user_id)
+
+        # Отправляем уведомления админу
+        if hasattr(support_handler, 'admin_notifications'):
+            for admin_id, notification in list(support_handler.admin_notifications.items()):
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=notification
+                    )
+                    # Удаляем отправленное уведомление
+                    del support_handler.admin_notifications[admin_id]
+                except Exception as e:
+                    log_system_event("support_chat", "send_admin_notification_error",
+                                     error=str(e), admin_id=admin_id)
+
+    except Exception as e:
+        log_system_event("support_chat", "send_notifications_error", error=str(e))
+
+
+async def notification_worker():
+    """Фоновая задача для отправки уведомлений"""
+    while True:
+        try:
+            await send_pending_notifications()
+            await asyncio.sleep(1)  # Проверяем каждую секунду
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log_system_event("notification_worker", "error", error=str(e))
+            await asyncio.sleep(5)
+
+
+async def stop_all_tasks(*tasks):
+    """Останавливает все фоновые задачи."""
+    tasks_to_cancel = []
+
+    for task in tasks:
+        if task:
+            tasks_to_cancel.append(task)
+
+    for task in tasks_to_cancel:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 # --- ЗАПУСК ВЕБХУКА ---
 async def main():
-    global keepalive_task
+    global keepalive_task, chat_cleanup_task
 
     log_system_event("bot", "starting", webhook_mode=WEBHOOK_MODE, port=WEBHOOK_PORT)
 
-    # Запускаем фоновую задачу для поддержания активности
+    # Инициализация сервиса синхронизации
+    init_sync_service()
+
+    # Запуск планировщика задач синхронизации
+    if scheduler_manager:
+        scheduler_started = scheduler_manager.start_scheduler()
+        if scheduler_started:
+            log_system_event("sync", "scheduler_started")
+        else:
+            log_system_event("sync", "scheduler_failed")
+    else:
+        log_system_event("sync", "scheduler_skipped", reason="Service not initialized")
+
+    # Запускаем фоновую задача для поддержания активности
     keepalive_task = asyncio.create_task(keepalive_worker())
     log_system_event("keepalive", "worker_started")
+
+    # Запускаем фоновую задачу для очистки чатов
+    chat_cleanup_task = asyncio.create_task(chat_cleanup_worker())
+    log_system_event("chat_cleanup", "worker_started")
+
+    # Запускаем фоновую задачу для отправки уведомлений
+    notification_task = asyncio.create_task(notification_worker())
+    log_system_event("notification", "worker_started")
 
     # Настраиваем вебхук в Max API
     webhook_success = await setup_webhook()
 
     if not webhook_success:
         log_system_event("bot", "webhook_setup_failed")
-        # Останавливаем keepalive задачу при ошибке
-        if keepalive_task:
-            keepalive_task.cancel()
+        # Останавливаем все задачи при ошибке
+        await stop_all_tasks(keepalive_task, chat_cleanup_task, notification_task)
         return
 
     log_system_event("bot", "webhook_server_starting", port=WEBHOOK_PORT)
@@ -619,13 +935,12 @@ async def main():
                 log_level='info'
             )
     finally:
-        # Останавливаем keepalive задачу при завершении работы
-        if keepalive_task:
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
+        # Останавливаем все задачи при завершении работы
+        await stop_all_tasks(keepalive_task, chat_cleanup_task, notification_task)
+
+        # Останавливаем планировщик синхронизации
+        if scheduler_manager:
+            await scheduler_manager.wait_for_scheduler()
 
 
 if __name__ == "__main__":

@@ -107,3 +107,4 @@ reminder_handler = ReminderHandler(db, None)
 # Устанавливаем бот в обработчики
 support_handler.set_bot(bot)
 
+

@@ -387,6 +387,7 @@ class SyncService:
             Результаты синхронизации
         """
         logger.info(f"Запуск синхронизации с мок-данными из {mock_file_path}")
+        start_time = datetime.now()
 
         try:
             # 1. Читаем файл напрямую
@@ -423,9 +424,10 @@ class SyncService:
                 return self._create_success_result(parsed_records, datetime.now(),
                                                    len(parsed_records), 0, 0)
 
-            # 4. Формируем данные для уведомлений (БЕЗ сохранения в БД для теста)
-            logger.info("Формирование уведомлений...")
+            # 4. Сохранение записей в БД и сбор новых записей для уведомлений
+            logger.info("4. Сохранение записей в базу данных...")
             user_appointments = {}
+            total_saved = 0
 
             for match in matched_records:
                 user_id = match['user_id']
@@ -436,27 +438,50 @@ class SyncService:
                     logger.debug(f"Уведомления отключены для пользователя {user_id}, пропускаем")
                     continue
 
-                # Подготавливаем данные для уведомления
-                if user_id not in user_appointments:
-                    user_appointments[user_id] = []
+                # Получаем данные записи
+                appointment_data = patient_data['appointment_data']
+                metadata = patient_data['metadata']
 
-                # Получаем ВСЕ данные для уведомления
-                user_appointments[user_id].append({
-                    # Данные для отображения
-                    'matching_data': patient_data.get('matching_data', {}),
-                    'appointment_data': patient_data.get('appointment_data', {}),
-                    'metadata': patient_data.get('metadata', {}),
-                    # Добавляем оригинальные поля для простоты доступа
-                    'patient_fio': patient_data.get('matching_data', {}).get('full_fio', 'не указано'),
-                    'visit_time': patient_data.get('metadata', {}).get('visit_time'),
-                    'mo_name': patient_data.get('metadata', {}).get('mo_name', 'не указано'),
-                    'mo_address': patient_data.get('appointment_data', {}).get('Адрес мед учреждения', 'не указано'),
-                    'doctor_fio': patient_data.get('appointment_data', {}).get('ФИО врача', 'не указано'),
-                    'doctor_position': patient_data.get('appointment_data', {}).get('Должность врача', 'не указано')
-                })
+                # Проверяем, не существует ли уже такая запись
+                visit_time = metadata['visit_time']
+                mo_name = metadata['mo_name']
 
-            # 5. Отправляем уведомления
-            logger.info("Отправка уведомлений пользователям...")
+                if self.appointments_db.appointment_exists(user_id, visit_time, mo_name):
+                    logger.debug(f"Запись уже существует для user_id={user_id}")
+                    continue
+
+                # Сохраняем запись в БД
+                success = self.appointments_db.add_appointment(
+                    user_id=user_id,
+                    appointment_data=appointment_data,
+                    visit_time=visit_time,
+                    mo_name=mo_name
+                )
+
+                if success:
+                    total_saved += 1
+
+                    # Подготавливаем данные для уведомления
+                    if user_id not in user_appointments:
+                        user_appointments[user_id] = []
+
+                    # Получаем ВСЕ данные для уведомления
+                    user_appointments[user_id].append({
+                        # Данные для отображения
+                        'matching_data': patient_data.get('matching_data', {}),
+                        'appointment_data': appointment_data,
+                        'metadata': metadata,
+                        # Добавляем оригинальные поля для простоты доступа
+                        'patient_fio': patient_data.get('matching_data', {}).get('full_fio', 'не указано'),
+                        'visit_time': visit_time,
+                        'mo_name': mo_name,
+                        'mo_address': appointment_data.get('Адрес мед учреждения', 'не указано'),
+                        'doctor_fio': appointment_data.get('ФИО врача', 'не указано'),
+                        'doctor_position': appointment_data.get('Должность врача', 'не указано')
+                    })
+
+            # 5. Отправка уведомлений пользователям
+            logger.info("5. Отправка уведомлений пользователям...")
             notification_results = None
 
             if user_appointments:
@@ -476,7 +501,7 @@ class SyncService:
 
             # 6. Формируем результат
             end_time = datetime.now()
-            duration = (end_time - datetime.now()).total_seconds()
+            duration = (end_time - start_time).total_seconds()
 
             parser_stats = self.parser.get_stats()
             matcher_stats = self.matcher.get_stats()
@@ -492,7 +517,7 @@ class SyncService:
                     'parse_errors': parser_stats.get('errors', 0),
                     'patients_matched': len(matched_records),
                     'patients_unmatched': len(unmatched_records),
-                    'new_appointments_saved': 0,  # Для мок-теста не сохраняем в БД
+                    'new_appointments_saved': total_saved,
                 },
                 'notifications': notifier_stats
             }
@@ -500,6 +525,7 @@ class SyncService:
             logger.info(f"МОК-СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА:")
             logger.info(f"  • Обработано записей: {len(parsed_records)}")
             logger.info(f"  • Найдено пациентов: {len(matched_records)}")
+            logger.info(f"  • Сохранено записей в БД: {total_saved}")
             logger.info(f"  • Отправлено уведомлений: {notifier_stats.get('sent', 0)}")
 
             return result

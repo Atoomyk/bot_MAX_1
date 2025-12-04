@@ -183,11 +183,31 @@ class SyncService:
     def _get_last_inserted_id(self, user_id: str, visit_time: datetime, mo_name: str) -> Optional[int]:
         """
         Получает ID последней вставленной записи.
-        В реальной реализации нужно получить ID из БД.
+
+        Args:
+            user_id: ID пользователя
+            visit_time: Время приема
+            mo_name: Название мед учреждения
+
+        Returns:
+            ID записи или None
         """
-        # Временная реализация - возвращаем None
-        # В реальном коде нужно запросить ID из БД
-        return None
+        try:
+            query = """
+            SELECT id FROM appointments 
+            WHERE user_id = %s 
+            AND external_visit_time = %s 
+            AND external_mo_name = %s
+            AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+            self.appointments_db.cursor.execute(query, (user_id, visit_time, mo_name))
+            row = self.appointments_db.cursor.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Ошибка получения ID записи: {e}")
+            return None
 
     def _create_success_result(self, parsed_records, start_time,
                                total_parsed, total_matched, total_saved,
@@ -461,12 +481,17 @@ class SyncService:
                 if success:
                     total_saved += 1
 
+                    # Получаем ID сохраненной записи для кнопки отмены
+                    db_id = self._get_last_inserted_id(user_id, visit_time, mo_name)
+
                     # Подготавливаем данные для уведомления
                     if user_id not in user_appointments:
                         user_appointments[user_id] = []
 
                     # Получаем ВСЕ данные для уведомления
                     user_appointments[user_id].append({
+                        # ID записи в БД для кнопки отмены
+                        'db_id': db_id,
                         # Данные для отображения
                         'matching_data': patient_data.get('matching_data', {}),
                         'appointment_data': appointment_data,

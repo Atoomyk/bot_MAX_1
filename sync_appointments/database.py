@@ -45,6 +45,8 @@ class AppointmentsDatabase:
                 external_visit_time TIMESTAMP,
                 external_mo_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) DEFAULT 'active',
+                cancelled_at TIMESTAMP NULL,
 
                 CONSTRAINT fk_user
                     FOREIGN KEY (user_id) 
@@ -53,6 +55,23 @@ class AppointmentsDatabase:
             );
             """
             self.cursor.execute(create_table_query)
+            
+            # Миграция: добавляем поля status и cancelled_at если их нет
+            self._add_column_if_not_exists('status', "VARCHAR(20) DEFAULT 'active'")
+            self._add_column_if_not_exists('cancelled_at', 'TIMESTAMP NULL')
+            
+            # Обновляем существующие записи: устанавливаем status = 'active'
+            try:
+                self.cursor.execute("""
+                    UPDATE appointments 
+                    SET status = 'active' 
+                    WHERE status IS NULL
+                """)
+                self.conn.commit()
+            except Exception as e:
+                logger.warning(f"Не удалось обновить существующие записи: {e}")
+                if self.conn:
+                    self.conn.rollback()
 
             # Создание индексов
             indexes = [
@@ -61,7 +80,8 @@ class AppointmentsDatabase:
                  "appointments (user_id, external_visit_time, external_mo_name)",
                  True),  # UNIQUE индекс
                 ("idx_appointments_visit_time", "appointments (external_visit_time)"),
-                ("idx_appointments_created_at", "appointments (created_at)")
+                ("idx_appointments_created_at", "appointments (created_at)"),
+                ("idx_appointments_status", "appointments (user_id, status)")
             ]
 
             for index_name, index_def, *unique in indexes:
@@ -129,8 +149,8 @@ class AppointmentsDatabase:
 
             query = """
             INSERT INTO appointments 
-            (user_id, appointment_json, external_visit_time, external_mo_name)
-            VALUES (%s, %s, %s, %s)
+            (user_id, appointment_json, external_visit_time, external_mo_name, status)
+            VALUES (%s, %s, %s, %s, 'active')
             ON CONFLICT (user_id, external_visit_time, external_mo_name) 
             DO NOTHING
             """
@@ -164,9 +184,9 @@ class AppointmentsDatabase:
         """
         try:
             query = """
-            SELECT id, appointment_json, external_visit_time, external_mo_name, created_at
+            SELECT id, appointment_json, external_visit_time, external_mo_name, created_at, status
             FROM appointments 
-            WHERE user_id = %s
+            WHERE user_id = %s AND status = 'active'
             ORDER BY external_visit_time DESC
             LIMIT %s
             """
@@ -183,7 +203,8 @@ class AppointmentsDatabase:
                         'data': appointment_data,
                         'visit_time': row[2],
                         'mo_name': row[3],
-                        'created_at': row[4]
+                        'created_at': row[4],
+                        'status': row[5] if len(row) > 5 else 'active'
                     })
                 except json.JSONDecodeError as e:
                     logger.error(f"Ошибка парсинга JSON записи id={row[0]}: {e}")
@@ -298,3 +319,179 @@ class AppointmentsDatabase:
         except Exception as e:
             logger.error(f"Ошибка получения статистики: {e}")
             return {}
+
+    def _add_column_if_not_exists(self, column_name: str, column_definition: str) -> None:
+        """
+        Добавляет колонку в таблицу, если она не существует.
+
+        Args:
+            column_name: Имя колонки
+            column_definition: Определение колонки (тип и ограничения)
+        """
+        try:
+            # Проверяем, существует ли колонка
+            self.cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='appointments' AND column_name=%s
+            """, (column_name,))
+            
+            if not self.cursor.fetchone():
+                # Колонка не существует, добавляем её
+                self.cursor.execute(f"""
+                    ALTER TABLE appointments 
+                    ADD COLUMN {column_name} {column_definition}
+                """)
+                self.conn.commit()
+                logger.info(f"Добавлена колонка {column_name} в таблицу appointments")
+        except Exception as e:
+            logger.warning(f"Не удалось добавить колонку {column_name}: {e}")
+            if self.conn:
+                self.conn.rollback()
+
+    def cancel_appointment(self, appointment_id: int, user_id: str) -> Dict[str, Any]:
+        """
+        Отменяет запись к врачу.
+
+        Args:
+            appointment_id: ID записи
+            user_id: ID пользователя (chat_id)
+
+        Returns:
+            Словарь с результатом:
+            - success: bool - успешность операции
+            - error: str - сообщение об ошибке (если есть)
+            - appointment_data: dict - данные записи (если успешно)
+        """
+        try:
+            # Получаем запись с проверкой принадлежности и статуса
+            query = """
+            SELECT id, appointment_json, created_at, status, cancelled_at
+            FROM appointments 
+            WHERE id = %s AND user_id = %s
+            """
+            self.cursor.execute(query, (appointment_id, user_id))
+            row = self.cursor.fetchone()
+
+            if not row:
+                return {
+                    'success': False,
+                    'error': 'Запись не найдена или не принадлежит вам'
+                }
+
+            appointment_id_db, appointment_json, created_at, status, cancelled_at = row
+
+            # Проверяем статус
+            if status == 'cancelled':
+                return {
+                    'success': False,
+                    'error': 'Запись уже отменена'
+                }
+
+            # Проверяем, прошло ли более 3 часов с момента создания
+            if created_at:
+                time_diff = datetime.now() - created_at
+                if time_diff.total_seconds() > 3 * 3600:  # 3 часа в секундах
+                    return {
+                        'success': False,
+                        'error': 'Нельзя отменить запись, если прошло более 3 часов с момента создания'
+                    }
+
+            # Обновляем запись
+            update_query = """
+            UPDATE appointments 
+            SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND user_id = %s AND status = 'active'
+            RETURNING appointment_json
+            """
+            self.cursor.execute(update_query, (appointment_id, user_id))
+            
+            if self.cursor.rowcount == 0:
+                return {
+                    'success': False,
+                    'error': 'Не удалось отменить запись (возможно, она уже отменена)'
+                }
+
+            self.conn.commit()
+            
+            # appointment_json может быть уже словарем (JSONB) или строкой
+            appointment_json_result = self.cursor.fetchone()[0]
+            if isinstance(appointment_json_result, str):
+                appointment_data = json.loads(appointment_json_result)
+            elif isinstance(appointment_json_result, dict):
+                # Уже словарь, ничего не делаем
+                appointment_data = appointment_json_result
+            else:
+                # Пытаемся преобразовать в строку и распарсить
+                appointment_data = json.loads(str(appointment_json_result))
+            
+            logger.info(f"Запись {appointment_id} успешно отменена пользователем {user_id}")
+            
+            return {
+                'success': True,
+                'appointment_data': appointment_data
+            }
+
+        except Exception as e:
+            logger.error(f"Ошибка отмены записи {appointment_id} для пользователя {user_id}: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return {
+                'success': False,
+                'error': f'Ошибка при отмене записи: {str(e)}'
+            }
+
+    def get_appointment_by_id_with_status(self, appointment_id: int, user_id: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Получает запись по ID с информацией о статусе.
+
+        Args:
+            appointment_id: ID записи
+            user_id: Опционально - ID пользователя для проверки принадлежности
+
+        Returns:
+            Словарь с данными записи и статусом или None
+        """
+        try:
+            if user_id:
+                query = """
+                SELECT id, appointment_json, status, cancelled_at, created_at
+                FROM appointments 
+                WHERE id = %s AND user_id = %s
+                """
+                params = (appointment_id, user_id)
+            else:
+                query = """
+                SELECT id, appointment_json, status, cancelled_at, created_at
+                FROM appointments 
+                WHERE id = %s
+                """
+                params = (appointment_id,)
+
+            self.cursor.execute(query, params)
+            row = self.cursor.fetchone()
+
+            if row:
+                # appointment_json может быть уже словарем (JSONB) или строкой
+                appointment_data = row[1]
+                if isinstance(appointment_data, str):
+                    appointment_data = json.loads(appointment_data)
+                elif isinstance(appointment_data, dict):
+                    # Уже словарь, ничего не делаем
+                    pass
+                else:
+                    # Пытаемся преобразовать в строку и распарсить
+                    appointment_data = json.loads(str(appointment_data))
+                
+                return {
+                    'id': row[0],
+                    'data': appointment_data,
+                    'status': row[2],
+                    'cancelled_at': row[3],
+                    'created_at': row[4]
+                }
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка получения записи id={appointment_id}: {e}")
+            return None

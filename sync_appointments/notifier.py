@@ -186,7 +186,7 @@ class Notifier:
     def _create_notification_keyboard(self, appointments: List[Dict[str, Any]]) -> Optional[Attachment]:
         """
         Создает клавиатуру только с кнопкой отмены записи.
-        Показывается только если есть ID записи в БД.
+        Показывается только если есть ID записи в БД и запись активна.
 
         Args:
             appointments: Список новых записей
@@ -210,6 +210,18 @@ class Notifier:
             # Кнопка "Отменить запись" показывается если есть одна запись с ID
             if len(appointments) == 1 and appointments[0].get('db_id'):
                 appointment_id = appointments[0]['db_id']
+                
+                # Проверяем статус записи, если appointments_db доступен
+                if self.appointments_db:
+                    try:
+                        appointment_info = self.appointments_db.get_appointment_by_id_with_status(appointment_id)
+                        if appointment_info and appointment_info.get('status') != 'active':
+                            logger.debug(f"Запись {appointment_id} не активна, кнопка отмены не показывается")
+                            return None
+                    except Exception as e:
+                        logger.warning(f"Не удалось проверить статус записи {appointment_id}: {e}")
+                        # Продолжаем, если не удалось проверить статус
+                
                 buttons.append([
                     CallbackButton(
                         text="❌ Отменить запись",

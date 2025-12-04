@@ -102,7 +102,7 @@ async def message_callback(event: MessageCallback):
             return
 
         elif payload.startswith("cancel_appointment:"):
-            log_user_event(chat_id_str, "appointment_cancel_attempted", payload=payload)
+            # Обработка отмены записи
             if payload == "cancel_appointment:stub":
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -110,6 +110,156 @@ async def message_callback(event: MessageCallback):
                          "Для отмены записи обратитесь в регистратуру медицинского учреждения "
                          "или воспользуйтесь порталом Госуслуги."
                 )
+                return
+            
+            # Извлекаем ID записи
+            try:
+                appointment_id = int(payload.split(":")[1])
+            except (ValueError, IndexError):
+                log_user_event(chat_id_str, "appointment_cancel_error", error="invalid_payload", payload=payload)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Ошибка: некорректный идентификатор записи."
+                )
+                return
+            
+            # Проверяем существование записи и её статус
+            # Импортируем sync_service динамически, так как он может быть инициализирован позже
+            from bot_config import sync_service as sync_service_check
+            if not sync_service_check or not hasattr(sync_service_check, 'appointments_db') or not sync_service_check.appointments_db:
+                log_user_event(chat_id_str, "appointment_cancel_error", error="service_unavailable")
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Сервис записей временно недоступен. Попробуйте позже."
+                )
+                return
+            
+            # Используем проверенный sync_service
+            sync_service = sync_service_check
+            
+            appointment = sync_service.appointments_db.get_appointment_by_id_with_status(
+                appointment_id, chat_id_str
+            )
+            
+            if not appointment:
+                log_user_event(chat_id_str, "appointment_cancel_error", 
+                             error="not_found", appointment_id=appointment_id)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Запись не найдена или не принадлежит вам."
+                )
+                return
+            
+            if appointment['status'] == 'cancelled':
+                log_user_event(chat_id_str, "appointment_cancel_error", 
+                             error="already_cancelled", appointment_id=appointment_id)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="ℹ️ Эта запись уже отменена."
+                )
+                return
+            
+            # Проверяем, прошло ли более 3 часов
+            if appointment['created_at']:
+                from datetime import datetime, timedelta
+                time_diff = datetime.now() - appointment['created_at']
+                if time_diff.total_seconds() > 3 * 3600:
+                    log_user_event(chat_id_str, "appointment_cancel_error", 
+                                 error="time_limit_exceeded", appointment_id=appointment_id)
+                    await event.bot.send_message(
+                        chat_id=chat_id,
+                        text="❌ Нельзя отменить запись, если прошло более 3 часов с момента создания."
+                    )
+                    return
+            
+            # Показываем подтверждение
+            log_user_event(chat_id_str, "appointment_cancel_confirmation_shown", appointment_id=appointment_id)
+            
+            from maxapi.types import CallbackButton
+            from maxapi.utils.inline_keyboard import ButtonsPayload, AttachmentType
+            from maxapi.types import Attachment
+            
+            confirmation_buttons = [
+                [
+                    CallbackButton(
+                        text="✅ Да",
+                        payload=f"cancel_appointment_confirm:{appointment_id}"
+                    ),
+                    CallbackButton(
+                        text="⬅️ Назад",
+                        payload="cancel_appointment_back"
+                    )
+                ]
+            ]
+            
+            buttons_payload = ButtonsPayload(buttons=confirmation_buttons)
+            keyboard = Attachment(
+                type=AttachmentType.INLINE_KEYBOARD,
+                payload=buttons_payload
+            )
+            
+            await event.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Вы подтверждаете отмену записи?\n\n"
+                     "При нажатии кнопки «Да», запись будет отменена без возможности восстановления.\n\n"
+                     "Запись можно отменить в течение 3 часов.",
+                attachments=[keyboard]
+            )
+            return
+        
+        elif payload.startswith("cancel_appointment_confirm:"):
+            # Подтверждение отмены записи
+            try:
+                appointment_id = int(payload.split(":")[1])
+            except (ValueError, IndexError):
+                log_user_event(chat_id_str, "appointment_cancel_error", error="invalid_confirm_payload", payload=payload)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Ошибка: некорректный идентификатор записи."
+                )
+                return
+            
+            # Импортируем sync_service динамически
+            from bot_config import sync_service as sync_service_check
+            if not sync_service_check or not hasattr(sync_service_check, 'appointments_db') or not sync_service_check.appointments_db:
+                log_user_event(chat_id_str, "appointment_cancel_error", error="service_unavailable")
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Сервис записей временно недоступен. Попробуйте позже."
+                )
+                return
+            
+            # Используем проверенный sync_service
+            sync_service = sync_service_check
+            
+            # Отменяем запись
+            result = sync_service.appointments_db.cancel_appointment(appointment_id, chat_id_str)
+            
+            if result['success']:
+                log_user_event(chat_id_str, "appointment_cancelled", appointment_id=appointment_id)
+                log_system_event("appointment", "cancelled", 
+                               appointment_id=appointment_id, chat_id=chat_id_str)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="✅ Запись была отменена."
+                )
+            else:
+                log_user_event(chat_id_str, "appointment_cancel_failed", 
+                             error=result.get('error', 'unknown'), appointment_id=appointment_id)
+                log_system_event("appointment", "cancel_failed", 
+                               appointment_id=appointment_id, 
+                               error=result.get('error', 'unknown'),
+                               chat_id=chat_id_str)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ {result.get('error', 'Не удалось отменить запись.')}"
+                )
+            return
+        
+        elif payload == "cancel_appointment_back":
+            # Возврат в главное меню
+            log_user_event(chat_id_str, "appointment_cancel_cancelled")
+            await send_main_menu(event.bot, chat_id)
             return
 
         # Обработка админских callback для синхронизации

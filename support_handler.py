@@ -104,8 +104,15 @@ class SupportHandler:
         if not chat_info:
             return
 
+        # Получаем бота для отправки уведомлений
+        bot = self._get_bot()
+        if not bot:
+            log_system_event("support_chat", "auto_end_no_bot", user_id=user_id)
+            return
+
         # Завершаем чат
         await self._end_chat(
+            bot=bot,
             user_id=user_id,
             ended_by="system",
             reason="inactivity"
@@ -133,12 +140,27 @@ class SupportHandler:
             log_system_event("support_chat", "cleanup_logs_error", error=str(e))
 
     def _create_log_filename(self, user_id: int) -> str:
-        """Создает имя файла для лога"""
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        """Создает имя файла для лога (с timestamp начала чата)"""
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         return f"{user_id}_{timestamp}.json"
 
+    def _get_log_filename(self, user_id: int) -> Optional[str]:
+        """Получает имя файла лога для чата (создает если не существует)"""
+        chat_info = self.active_chats.get(user_id)
+        if not chat_info:
+            return None
+        
+        # Если имя файла уже создано, возвращаем его
+        if 'log_filename' in chat_info:
+            return chat_info['log_filename']
+        
+        # Создаем новое имя файла и сохраняем его
+        filename = self._create_log_filename(user_id)
+        chat_info['log_filename'] = filename
+        return filename
+
     def _save_chat_log(self, user_id: int, end_chat: bool = False):
-        """Сохраняет лог чата в файл"""
+        """Сохраняет лог чата в файл (обновляет один и тот же файл)"""
         try:
             if user_id not in self.chat_logs:
                 return
@@ -166,10 +188,17 @@ class SupportHandler:
                 ]
             }
 
-            # Сохраняем в файл
-            filename = self._create_log_filename(user_id)
+            # Получаем имя файла (используем сохраненное или создаем новое)
+            filename = self._get_log_filename(user_id)
+            if not filename:
+                # Если чат уже завершен, создаем имя файла на основе start_time
+                start_time_obj = datetime.strptime(chat_log.start_time, "%Y-%m-%d %H:%M:%S")
+                timestamp = start_time_obj.strftime("%Y-%m-%d_%H-%M-%S")
+                filename = f"{user_id}_{timestamp}.json"
+            
             filepath = TICKETS_DIR / filename
 
+            # Сохраняем/обновляем файл
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(log_dict, f, ensure_ascii=False, indent=2)
 
@@ -242,20 +271,28 @@ class SupportHandler:
         # Сохраняем в памяти
         self.chat_logs[user_id] = chat_log
 
+        # Создаем имя файла для лога один раз при создании чата
+        log_filename = self._create_log_filename(user_id)
+
         # Добавляем в активные чаты
         self.active_chats[user_id] = {
             'user_data': user_data,
             'last_activity': time.time(),
             'waiting_for_admin': True,
-            'messages_queue': []  # Сообщения, отправленные до подключения админа
+            'messages_queue': [],  # Сообщения, отправленные до подключения админа
+            'log_filename': log_filename  # Сохраняем имя файла для этого чата
         }
 
-        log_user_event(str(user_id), "chat_created")
+        log_user_event(str(user_id), "chat_created", log_filename=log_filename)
 
     async def _notify_admin_new_chat(self, bot, user_id: int, user_data: dict):
         """Уведомляет администратора о новом чате"""
         if not self.admin_id:
             log_system_event("support_chat", "no_admin_id")
+            return
+
+        if not bot:
+            log_system_event("support_chat", "no_bot_for_notification", user_id=user_id)
             return
 
         try:
@@ -280,82 +317,113 @@ class SupportHandler:
 
     async def connect_admin_to_chat(self, bot, admin_id: int, user_id: int) -> bool:
         """Подключает администратора к чату с пользователем"""
-        # Проверяем права админа
-        if admin_id != self.admin_id:
-            await bot.send_message(
-                chat_id=admin_id,
-                text="❌ У вас нет прав администратора."
-            )
-            return False
-
-        # Проверяем, не занят ли уже админ
-        if self.admin_active_chat is not None:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=f"❌ У вас уже есть активный чат с пользователем {self.admin_active_chat}.\n\nЗавершите его командой /end"
-            )
-            return False
-
-        # Проверяем, существует ли чат
-        if user_id not in self.active_chats:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=f"❌ Чат с пользователем {user_id} не найден или уже завершен."
-            )
-            return False
-
-        # Проверяем, не подключен ли уже другой админ
-        chat_info = self.active_chats[user_id]
-        if not chat_info.get('waiting_for_admin', True):
-            await bot.send_message(
-                chat_id=admin_id,
-                text="❌ Этот чат уже обрабатывается другим оператором."
-            )
-            return False
-
-        # Подключаем админа
-        self.admin_active_chat = user_id
-        chat_info['waiting_for_admin'] = False
-        chat_info['admin_id'] = admin_id
-        chat_info['last_activity'] = time.time()
-
-        # Обновляем лог
-        if user_id in self.chat_logs:
-            self.chat_logs[user_id].admin_id = admin_id
-
-        # Отправляем подтверждение админу
-        await bot.send_message(
-            chat_id=admin_id,
-            text=f"✅ Вы начали чат с пользователем {user_id}.\n\nВсе ваши текстовые сообщения будут пересылаться ему.\n\nДля завершения чата отправьте /end или цифру 0."
-        )
-
-        # Отправляем накопленные сообщения от пользователя админу
-        messages_queue = chat_info.get('messages_queue', [])
-        if messages_queue:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=f"📨 Сообщения от пользователя (отправлены до вашего подключения):"
-            )
-
-            for msg in messages_queue:
+        success_message_sent = False
+        try:
+            # Проверяем права админа
+            if admin_id != self.admin_id:
                 await bot.send_message(
                     chat_id=admin_id,
-                    text=f"👤 Пользователь: {msg}"
+                    text="❌ У вас нет прав администратора."
                 )
+                return False
 
-        # Очищаем очередь
-        chat_info['messages_queue'] = []
+            # Проверяем, не занят ли уже админ
+            if self.admin_active_chat is not None:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=f"❌ У вас уже есть активный чат с пользователем {self.admin_active_chat}.\n\nЗавершите его командой /end"
+                )
+                return False
 
-        log_user_event(str(user_id), "admin_connected", admin_id=admin_id)
-        log_security_event(str(admin_id), "chat_started", user_id=user_id)
+            # Проверяем, существует ли чат
+            if user_id not in self.active_chats:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=f"❌ Чат с пользователем {user_id} не найден или уже завершен."
+                )
+                return False
 
-        return True
+            # Проверяем, не подключен ли уже другой админ
+            chat_info = self.active_chats[user_id]
+            if not chat_info.get('waiting_for_admin', True):
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text="❌ Этот чат уже обрабатывается другим оператором."
+                )
+                return False
+
+            # Подключаем админа
+            self.admin_active_chat = user_id
+            chat_info['waiting_for_admin'] = False
+            chat_info['admin_id'] = admin_id
+            chat_info['last_activity'] = time.time()
+
+            # Обновляем лог
+            if user_id in self.chat_logs:
+                self.chat_logs[user_id].admin_id = admin_id
+
+            # Отправляем подтверждение админу
+            await bot.send_message(
+                chat_id=admin_id,
+                text=f"✅ Вы начали чат с пользователем {user_id}.\n\nВсе ваши текстовые сообщения будут пересылаться ему.\n\nДля завершения чата отправьте /end или цифру 0."
+            )
+            success_message_sent = True
+
+            # Отправляем накопленные сообщения от пользователя админу
+            messages_queue = chat_info.get('messages_queue', [])
+            if messages_queue:
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=f"📨 Сообщения от пользователя (отправлены до вашего подключения):"
+                    )
+
+                    for msg in messages_queue:
+                        try:
+                            await bot.send_message(
+                                chat_id=admin_id,
+                                text=f"👤 Пользователь: {msg}"
+                            )
+                        except Exception as e:
+                            log_system_event("support_chat", "send_queued_message_error",
+                                           error=str(e), user_id=user_id, admin_id=admin_id)
+                            # Продолжаем отправку остальных сообщений
+                except Exception as e:
+                    log_system_event("support_chat", "send_queue_header_error",
+                                   error=str(e), user_id=user_id, admin_id=admin_id)
+                    # Продолжаем выполнение, даже если не удалось отправить заголовок очереди
+
+            # Очищаем очередь
+            chat_info['messages_queue'] = []
+
+            log_user_event(str(user_id), "admin_connected", admin_id=admin_id)
+            log_security_event(str(admin_id), "chat_started", user_id=user_id)
+
+            return True
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            log_system_event("support_chat", "connect_admin_error",
+                           error=str(e), user_id=user_id, admin_id=admin_id, 
+                           traceback=error_traceback)
+            # Если успешное сообщение уже отправлено, не отправляем сообщение об ошибке
+            if not success_message_sent:
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=f"❌ Произошла ошибка при подключении к чату с пользователем {user_id}."
+                    )
+                except:
+                    pass
+            # Если успешное сообщение отправлено, но произошла ошибка позже, 
+            # все равно возвращаем True, так как подключение фактически состоялось
+            return success_message_sent
 
     async def process_user_message(self, bot, user_id: int, message_text: str) -> bool:
         """Обрабатывает сообщение от пользователя в чате"""
         # Проверяем команду выхода
         if message_text.strip() == "0":
-            await self._end_chat(user_id, "user", "user_exit")
+            await self._end_chat(bot, user_id, "user", "user_exit")
             return True
 
         # Проверяем, в чате ли пользователь
@@ -374,6 +442,7 @@ class SupportHandler:
                     time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 )
             )
+            # Обновляем один и тот же файл при каждом сообщении
             self._save_chat_log(user_id)
 
         # Если админ еще не подключен, сохраняем в очередь
@@ -400,114 +469,174 @@ class SupportHandler:
 
     async def process_admin_message(self, bot, admin_id: int, message_text: str) -> bool:
         """Обрабатывает сообщение от администратора"""
-        # Проверяем права
-        if admin_id != self.admin_id:
-            return False
+        try:
+            # Проверяем права
+            if admin_id != self.admin_id:
+                return False
 
-        # Проверяем команду выхода
-        if message_text.strip() in ["0", "/end"]:
-            if self.admin_active_chat:
-                await self._end_chat(self.admin_active_chat, "admin", "admin_exit")
-            else:
-                await bot.send_message(
-                    chat_id=admin_id,
-                    text="❌ У вас нет активного чата для завершения."
-                )
-            return True
-
-        # Проверяем, есть ли активный чат
-        if not self.admin_active_chat:
-            # Если админ отправляет /chat <user_id>
-            if message_text.startswith("/chat "):
-                try:
-                    user_id_str = message_text.split()[1]
-                    user_id = int(user_id_str)
-                    return await self.connect_admin_to_chat(bot, admin_id, user_id)
-                except (ValueError, IndexError):
+            # Проверяем команду выхода
+            if message_text.strip() in ["0", "/end"]:
+                if self.admin_active_chat:
+                    await self._end_chat(bot, self.admin_active_chat, "admin", "admin_exit")
+                else:
                     await bot.send_message(
                         chat_id=admin_id,
-                        text="❌ Неверный формат команды. Используйте: /chat <user_id>"
+                        text="❌ У вас нет активного чата для завершения."
                     )
-                    return True
-            return False
+                return True
 
-        user_id = self.admin_active_chat
+            # Проверяем, есть ли активный чат
+            if not self.admin_active_chat:
+                # Если админ отправляет /chat <user_id>
+                if message_text.startswith("/chat "):
+                    try:
+                        user_id_str = message_text.split()[1]
+                        user_id = int(user_id_str)
+                        result = await self.connect_admin_to_chat(bot, admin_id, user_id)
+                        return result
+                    except (ValueError, IndexError) as e:
+                        log_system_event("support_chat", "chat_command_parse_error", 
+                                       error=str(e), message=message_text, admin_id=admin_id)
+                        await bot.send_message(
+                            chat_id=admin_id,
+                            text="❌ Неверный формат команды. Используйте: /chat <user_id>"
+                        )
+                        return True
+                    except Exception as e:
+                        log_system_event("support_chat", "chat_command_error", 
+                                       error=str(e), message=message_text, admin_id=admin_id)
+                        # Не пробрасываем исключение дальше, возвращаем True чтобы остановить дальнейшую обработку
+                        return True
+                return False
 
-        # Проверяем, существует ли чат
-        if user_id not in self.active_chats:
-            await bot.send_message(
-                chat_id=admin_id,
-                text="❌ Чат с пользователем не найден или уже завершен."
-            )
-            self.admin_active_chat = None
-            return False
+            user_id = self.admin_active_chat
 
-        chat_info = self.active_chats[user_id]
-        chat_info['last_activity'] = time.time()
-
-        # Добавляем сообщение в лог
-        if user_id in self.chat_logs:
-            self.chat_logs[user_id].messages.append(
-                ChatMessage(
-                    from_user="admin",
-                    text=message_text,
-                    time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Проверяем, существует ли чат
+            if user_id not in self.active_chats:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text="❌ Чат с пользователем не найден или уже завершен."
                 )
-            )
-            self._save_chat_log(user_id)
+                self.admin_active_chat = None
+                return False
 
-        # Пересылаем сообщение пользователю
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"👨‍⚕️ Оператор:\n{message_text}"
-            )
-            return True
+            chat_info = self.active_chats[user_id]
+            chat_info['last_activity'] = time.time()
+
+            # Добавляем сообщение в лог
+            if user_id in self.chat_logs:
+                self.chat_logs[user_id].messages.append(
+                    ChatMessage(
+                        from_user="admin",
+                        text=message_text,
+                        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                )
+                # Обновляем один и тот же файл при каждом сообщении
+                self._save_chat_log(user_id)
+
+            # Пересылаем сообщение пользователю
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"👨‍⚕️ Оператор:\n{message_text}"
+                )
+                return True
+            except Exception as e:
+                log_system_event("support_chat", "forward_to_user_error",
+                                 error=str(e), user_id=user_id)
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=f"❌ Не удалось отправить сообщение пользователю {user_id}."
+                )
+                return False
         except Exception as e:
-            log_system_event("support_chat", "forward_to_user_error",
-                             error=str(e), user_id=user_id)
-            await bot.send_message(
-                chat_id=admin_id,
-                text=f"❌ Не удалось отправить сообщение пользователю {user_id}."
-            )
-            return False
+            # Логируем ошибку, но не пробрасываем её дальше, чтобы не показывать пользователю
+            log_system_event("support_chat", "process_admin_message_error",
+                           error=str(e), admin_id=admin_id, message=message_text)
+            # Возвращаем True, чтобы остановить дальнейшую обработку сообщения
+            return True
 
-    async def _end_chat(self, user_id: int, ended_by: str, reason: str):
+    async def _end_chat(self, bot, user_id: int, ended_by: str, reason: str):
         """Завершает чат"""
         chat_info = self.active_chats.get(user_id)
         if not chat_info:
             return
 
-        # Отправляем уведомления
-        if ended_by == "user":
-            # Пользователю
-            await self._send_message_to_user(user_id,
-                                             "Чат с техподдержкой завершён.")
+        # Сохраняем информацию перед очисткой структур
+        admin_id = chat_info.get('admin_id')
 
-            # Админу (если подключен)
-            if chat_info.get('admin_id'):
-                await self._send_message_to_admin(chat_info['admin_id'],
-                                                  f"Пользователь {user_id} завершил чат.")
+        # Отправляем уведомления напрямую через бота (до очистки структур)
+        try:
+            if ended_by == "user":
+                # Пользователю
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text="Чат с техподдержкой завершён."
+                    )
+                except Exception as e:
+                    log_system_event("support_chat", "end_notification_user_error",
+                                     error=str(e), user_id=user_id)
 
-        elif ended_by == "admin":
-            # Пользователю
-            await self._send_message_to_user(user_id,
-                                             "Оператор завершил чат.")
+                # Админу (если подключен или если еще не подключился - уведомляем через self.admin_id)
+                target_admin_id = admin_id if admin_id else self.admin_id
+                if target_admin_id:
+                    try:
+                        await bot.send_message(
+                            chat_id=target_admin_id,
+                            text=f"Пользователь {user_id} завершил чат."
+                        )
+                    except Exception as e:
+                        log_system_event("support_chat", "end_notification_admin_error",
+                                         error=str(e), admin_id=target_admin_id, user_id=user_id)
 
-            # Админу
-            if chat_info.get('admin_id'):
-                await self._send_message_to_admin(chat_info['admin_id'],
-                                                  f"Чат с пользователем {user_id} завершён.")
+            elif ended_by == "admin":
+                # Пользователю
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text="Оператор завершил чат."
+                    )
+                except Exception as e:
+                    log_system_event("support_chat", "end_notification_user_error",
+                                     error=str(e), user_id=user_id)
 
-        elif ended_by == "system":
-            # Пользователю
-            await self._send_message_to_user(user_id,
-                                             "Чат автоматически завершен из-за неактивности.")
+                # Админу (подтверждение)
+                if admin_id:
+                    try:
+                        await bot.send_message(
+                            chat_id=admin_id,
+                            text=f"Чат с пользователем {user_id} завершён."
+                        )
+                    except Exception as e:
+                        log_system_event("support_chat", "end_notification_admin_error",
+                                         error=str(e), admin_id=admin_id, user_id=user_id)
 
-            # Админу (если подключен)
-            if chat_info.get('admin_id'):
-                await self._send_message_to_admin(chat_info['admin_id'],
-                                                  f"Чат с пользователем {user_id} автоматически завершен.")
+            elif ended_by == "system":
+                # Пользователю
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text="Чат автоматически завершен из-за неактивности."
+                    )
+                except Exception as e:
+                    log_system_event("support_chat", "end_notification_user_error",
+                                     error=str(e), user_id=user_id)
+
+                # Админу (если подключен)
+                if admin_id:
+                    try:
+                        await bot.send_message(
+                            chat_id=admin_id,
+                            text=f"Чат с пользователем {user_id} автоматически завершен."
+                        )
+                    except Exception as e:
+                        log_system_event("support_chat", "end_notification_admin_error",
+                                         error=str(e), admin_id=admin_id, user_id=user_id)
+        except Exception as e:
+            log_system_event("support_chat", "end_chat_notifications_error",
+                             error=str(e), user_id=user_id)
 
         # Сохраняем лог
         self._save_chat_log(user_id, end_chat=True)
@@ -556,15 +685,11 @@ class SupportHandler:
         self._create_new_chat(user_id, user_data)
 
         # Уведомляем админа
-        if self.admin_id:
-            await self._notify_admin_new_chat(self._get_bot(), user_id, user_data)
+        bot = self._get_bot()
+        if self.admin_id and bot:
+            await self._notify_admin_new_chat(bot, user_id, user_data)
 
         log_system_event("support_chat", "next_user_notified", user_id=user_id)
-
-    def _get_bot(self):
-        """Получает экземпляр бота (будет установлен из bot.py)"""
-        # Этот метод будет переопределен в bot.py
-        return None
 
     def set_bot(self, bot):
         """Устанавливает экземпляр бота для отправки сообщений"""
@@ -572,7 +697,7 @@ class SupportHandler:
 
     def _get_bot(self):
         """Получает экземпляр бота"""
-        return self._bot_instance
+        return getattr(self, '_bot_instance', None)
 
 
 # Глобальный экземпляр

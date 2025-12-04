@@ -83,12 +83,61 @@ class UserDatabase:
         try:
             query = """
             CREATE TABLE IF NOT EXISTS user_reminders (
-                user_id VARCHAR(255) PRIMARY KEY,
+                chat_id VARCHAR(255) PRIMARY KEY,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                
+                CONSTRAINT fk_user_reminders_user
+                    FOREIGN KEY (chat_id) 
+                    REFERENCES users(chat_id)
+                    ON DELETE CASCADE
             );
             """
             self.cursor.execute(query)
+            
+            # Миграция: переименовываем колонку user_id в chat_id, если она существует
+            try:
+                # Проверяем, существует ли колонка user_id
+                self.cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='user_reminders' AND column_name='user_id'
+                """)
+                if self.cursor.fetchone():
+                    # Переименовываем колонку
+                    self.cursor.execute("""
+                        ALTER TABLE user_reminders 
+                        RENAME COLUMN user_id TO chat_id
+                    """)
+                    logging.info("INFO: Колонка user_id переименована в chat_id в таблице user_reminders")
+            except psycopg2.Error as e:
+                logging.warning(f"WARNING: Не удалось переименовать колонку user_id: {e}")
+                # Продолжаем работу, возможно колонка уже переименована или не существует
+            
+            # Миграция: добавляем внешний ключ, если его нет
+            try:
+                # Проверяем, существует ли уже внешний ключ
+                self.cursor.execute("""
+                    SELECT constraint_name 
+                    FROM information_schema.table_constraints 
+                    WHERE table_name='user_reminders' 
+                    AND constraint_type='FOREIGN KEY'
+                    AND constraint_name='fk_user_reminders_user'
+                """)
+                if not self.cursor.fetchone():
+                    # Добавляем внешний ключ
+                    self.cursor.execute("""
+                        ALTER TABLE user_reminders 
+                        ADD CONSTRAINT fk_user_reminders_user
+                        FOREIGN KEY (chat_id) 
+                        REFERENCES users(chat_id)
+                        ON DELETE CASCADE
+                    """)
+                    logging.info("INFO: Добавлен внешний ключ fk_user_reminders_user в таблице user_reminders")
+            except psycopg2.Error as e:
+                logging.warning(f"WARNING: Не удалось добавить внешний ключ: {e}")
+                # Продолжаем работу, возможно ключ уже существует
+            
             self.conn.commit()
             logging.info("INFO: Таблица user_reminders проверена/создана.")
         except psycopg2.Error as e:
@@ -104,7 +153,7 @@ class UserDatabase:
         """
         try:
             self.cursor.execute(
-                "SELECT 1 FROM user_reminders WHERE user_id = %s",
+                "SELECT 1 FROM user_reminders WHERE chat_id = %s",
                 (chat_id,)
             )
             if self.cursor.fetchone():
@@ -112,7 +161,7 @@ class UserDatabase:
 
             self.cursor.execute(
                 """
-                INSERT INTO user_reminders (user_id, enabled, updated_at)
+                INSERT INTO user_reminders (chat_id, enabled, updated_at)
                 VALUES (%s, TRUE, NOW())
                 """,
                 (chat_id,)
@@ -134,7 +183,7 @@ class UserDatabase:
         """
         try:
             self.cursor.execute(
-                "SELECT enabled FROM user_reminders WHERE user_id = %s",
+                "SELECT enabled FROM user_reminders WHERE chat_id = %s",
                 (chat_id,)
             )
             row = self.cursor.fetchone()
@@ -157,9 +206,9 @@ class UserDatabase:
         try:
             self.cursor.execute(
                 """
-                INSERT INTO user_reminders (user_id, enabled, updated_at)
+                INSERT INTO user_reminders (chat_id, enabled, updated_at)
                 VALUES (%s, %s, NOW())
-                ON CONFLICT (user_id)
+                ON CONFLICT (chat_id)
                 DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()
                 """,
                 (chat_id, enabled)

@@ -175,8 +175,6 @@ class Notifier:
 
                     message += "\n"
 
-                message += "ℹ️ Для отмены записи обратитесь в регистратуру медучреждения."
-
             return message
 
         except Exception as e:
@@ -207,9 +205,12 @@ class Notifier:
 
             buttons = []
 
-            # Кнопка "Отменить запись" показывается если есть одна запись с ID
-            if len(appointments) == 1 and appointments[0].get('db_id'):
-                appointment_id = appointments[0]['db_id']
+            # Создаем кнопку отмены для каждой записи с ID
+            active_appointments_count = 0
+            for appointment in appointments:
+                appointment_id = appointment.get('db_id')
+                if not appointment_id:
+                    continue
                 
                 # Проверяем статус записи, если appointments_db доступен
                 if self.appointments_db:
@@ -217,19 +218,28 @@ class Notifier:
                         appointment_info = self.appointments_db.get_appointment_by_id_with_status(appointment_id)
                         if appointment_info and appointment_info.get('status') != 'active':
                             logger.debug(f"Запись {appointment_id} не активна, кнопка отмены не показывается")
-                            return None
+                            continue
                     except Exception as e:
                         logger.warning(f"Не удалось проверить статус записи {appointment_id}: {e}")
                         # Продолжаем, если не удалось проверить статус
                 
+                active_appointments_count += 1
+                
+                # Формируем текст кнопки в зависимости от количества активных записей
+                if active_appointments_count == 1 and len(appointments) == 1:
+                    button_text = "❌ Отменить запись"
+                else:
+                    # Для нескольких записей добавляем номер записи
+                    # Используем порядковый номер из списка appointments
+                    appointment_index = appointments.index(appointment) + 1
+                    button_text = f"❌ Отменить запись #{appointment_index}"
+                
                 buttons.append([
                     CallbackButton(
-                        text="❌ Отменить запись",
+                        text=button_text,
                         payload=f"cancel_appointment:{appointment_id}"
                     )
                 ])
-
-            # Для нескольких записей кнопку отмены не показываем (непонятно какую отменять)
 
             if not buttons:
                 return None

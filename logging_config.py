@@ -109,17 +109,145 @@ def setup_logging():
     logging.log(SYSTEM_LEVEL, "Logging system initialized")
 
 
+# Словари переводов для логирования
+USER_EVENT_TRANSLATIONS = {
+    "appointment_cancel_error": {
+        "invalid_payload": "Ошибка отмены записи: некорректный идентификатор записи",
+        "service_unavailable": "Ошибка отмены записи: сервис недоступен",
+        "not_found": "Ошибка отмены записи: запись не найдена",
+        "already_cancelled": "Ошибка отмены записи: уже отменена",
+        "time_limit_exceeded": "Ошибка отмены записи: превышен лимит времени (более 3 часов)",
+        "invalid_confirm_payload": "Ошибка отмены записи: некорректный идентификатор при подтверждении",
+        "unknown": "Ошибка отмены записи: неизвестная ошибка"
+    },
+    "appointment_cancel_confirmation_shown": "Показано подтверждение отмены записи",
+    "appointment_cancelled": "Запись отменена",
+    "appointment_cancel_failed": "Не удалось отменить запись",
+    "appointment_cancel_cancelled": "Отмена записи отменена пользователем",
+    "button_pressed": {
+        "cancel_appointment_back": "Нажата кнопка «Назад» в меню отмены записи",
+        "other_options": "Нажата кнопка «Другие возможности»",
+        "default": "Нажата кнопка"
+    },
+    "message_sent": "Отправлено сообщение",
+    "other_options_menu_opened": "Открыто меню «Другие возможности»",
+    "appointments_list_viewed": "Просмотрен список записей",
+    "appointment_details_viewed": "Просмотрены детали записи",
+    "bot_started": "Бот запущен",
+    "already_registered": "Пользователь уже зарегистрирован",
+    "new_user_detected": "Обнаружен новый пользователь",
+    "registration_start_clicked": "Нажата кнопка начала регистрации",
+    "phone_confirmed": "Телефон подтвержден",
+    "phone_rejected": "Телефон отклонен",
+    "fio_correction_requested": "Запрошена коррекция ФИО",
+    "birth_date_correction_requested": "Запрошена коррекция даты рождения",
+    "registration_data_confirmed": "Данные регистрации подтверждены",
+    "back_to_main_menu": "Возврат в главное меню",
+    "reminders_settings_opened": "Открыты настройки напоминаний",
+    "reminders_enabled": "Напоминания включены",
+    "reminders_disabled": "Напоминания выключены",
+    "reminders_back_clicked": "Нажата кнопка «Назад» в настройках напоминаний",
+    "support_chat_requested": "Запрошен чат поддержки",
+    "message_ignored_unregistered": "Сообщение проигнорировано (пользователь не зарегистрирован)"
+}
+
+SYSTEM_EVENT_TRANSLATIONS = {
+    "appointment": {
+        "cancelled": "Запись отменена",
+        "cancel_failed": "Не удалось отменить запись"
+    }
+}
+
+
+def _translate_user_event(action, **details):
+    """Переводит событие пользователя на русский"""
+    if action in USER_EVENT_TRANSLATIONS:
+        translation = USER_EVENT_TRANSLATIONS[action]
+        
+        # Если это словарь (для событий с вариантами)
+        if isinstance(translation, dict):
+            # Проверяем наличие ключа error или payload в details
+            if "error" in details:
+                error_key = details.get("error", "unknown")
+                if error_key in translation:
+                    base_msg = translation[error_key]
+                else:
+                    base_msg = translation.get("default", action)
+            elif "payload" in details:
+                payload = details.get("payload", "")
+                # Проверяем точное совпадение
+                if payload in translation:
+                    base_msg = translation[payload]
+                # Проверяем начало payload (для cancel_appointment:ID и т.д.)
+                elif payload.startswith("cancel_appointment:"):
+                    base_msg = "Нажата кнопка «Отменить запись»"
+                elif payload.startswith("cancel_appointment_confirm:"):
+                    base_msg = "Нажата кнопка «Да» для подтверждения отмены записи"
+                else:
+                    base_msg = translation.get("default", action)
+            else:
+                base_msg = translation.get("default", action)
+        else:
+            base_msg = translation
+        
+        # Формируем детали
+        detail_parts = []
+        if "appointment_id" in details:
+            detail_parts.append(f"appointment_id={details['appointment_id']}")
+        if "error" in details and action == "appointment_cancel_error":
+            # error уже включен в перевод
+            pass
+        elif "payload" in details and action == "button_pressed":
+            # payload уже включен в перевод
+            pass
+        elif "text" in details:
+            detail_parts.append(f"«{details['text']}»")
+        
+        if detail_parts:
+            return f"{base_msg} ({', '.join(detail_parts)})"
+        return base_msg
+    
+    # Если перевода нет, возвращаем оригинал
+    details_str = " ".join([f'{k}={v}' for k, v in details.items()])
+    return f"{action} {details_str}" if details_str else action
+
+
+def _translate_system_event(component, event, **details):
+    """Переводит системное событие на русский"""
+    if component in SYSTEM_EVENT_TRANSLATIONS:
+        component_translations = SYSTEM_EVENT_TRANSLATIONS[component]
+        if event in component_translations:
+            base_msg = component_translations[event]
+            
+            # Формируем детали
+            detail_parts = []
+            if "appointment_id" in details:
+                detail_parts.append(f"appointment_id={details['appointment_id']}")
+            if "error" in details:
+                detail_parts.append(f"ошибка: {details['error']}")
+            if "chat_id" in details:
+                detail_parts.append(f"chat_id={details['chat_id']}")
+            
+            if detail_parts:
+                return f"{base_msg} ({', '.join(detail_parts)})"
+            return base_msg
+    
+    # Если перевода нет, возвращаем оригинал
+    details_str = " ".join([f'{k}={v}' for k, v in details.items()])
+    return f"[{component}] {event} {details_str}" if details_str else f"[{component}] {event}"
+
+
 # Утилиты для логирования
 def log_user_event(user_id, action, **details):
     """Логирует действия пользователя"""
-    details_str = " ".join([f'{k}={v}' for k, v in details.items()])
-    logging.log(USER_LEVEL, f"[chat_id={user_id}] {action} {details_str}")
+    translated_msg = _translate_user_event(action, **details)
+    logging.log(USER_LEVEL, f"[chat_id={user_id}] {translated_msg}")
 
 
 def log_system_event(component, event, **details):
     """Логирует системные события"""
-    details_str = " ".join([f'{k}={v}' for k, v in details.items()])
-    logging.log(SYSTEM_LEVEL, f"[{component}] {event} {details_str}")
+    translated_msg = _translate_system_event(component, event, **details)
+    logging.log(SYSTEM_LEVEL, translated_msg)
 
 
 def log_data_event(user_id, operation, **details):

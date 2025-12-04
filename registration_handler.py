@@ -3,11 +3,10 @@ import re
 import asyncio
 from typing import Dict, Any, Callable, Optional
 from maxapi import Bot
-from maxapi.types import Attachment, ButtonsPayload, CallbackButton, LinkButton, RequestContactButton
-from maxapi.utils.inline_keyboard import AttachmentType
 
 from user_database import db
 from logging_config import log_user_event, log_data_event, log_system_event
+from bot_utils import create_keyboard
 
 # Callback-константы для регистрации
 SOGL_LINK = "https://sevmiac.ru/upload/iblock/d73/sttjnvlhg3j2df943ve0fv3husrlm8oj.pdf"
@@ -29,42 +28,9 @@ class RegistrationHandler:
     def __init__(self, user_states: Dict[str, Any]):
         self.user_states = user_states
 
-    def create_keyboard(self, buttons_config):
-        """Универсальная функция создания клавиатуры для регистрации"""
-        if not buttons_config:
-            return None
-
-        formatted_buttons = []
-        for row in buttons_config:
-            button_row = []
-            for button in row:
-                if isinstance(button, dict):
-                    if button.get('type') == 'callback':
-                        btn = CallbackButton(text=button['text'], payload=button['payload'])
-                    elif button.get('type') == 'link':
-                        btn = LinkButton(text=button['text'], url=button['url'])
-                    elif button.get('type') == 'contact':
-                        btn = RequestContactButton(text=button['text'])
-                    else:
-                        continue
-                    button_row.append(btn)
-                else:
-                    button_row.append(button)
-            if button_row:
-                formatted_buttons.append(button_row)
-
-        if not formatted_buttons:
-            return None
-
-        buttons_payload = ButtonsPayload(buttons=formatted_buttons)
-        return Attachment(
-            type=AttachmentType.INLINE_KEYBOARD,
-            payload=buttons_payload
-        )
-
     async def send_agreement_message(self, bot_instance: Bot, chat_id: int):
         """Отправляет сообщение с соглашением"""
-        keyboard = self.create_keyboard([[
+        keyboard = create_keyboard([[
             {'type': 'callback', 'text': 'Согласие на обработку персональных данных', 'payload': AGREEMENT_CALLBACK}
         ]])
 
@@ -87,7 +53,7 @@ class RegistrationHandler:
 
     async def request_contact(self, bot_instance: Bot, chat_id: int):
         """Запрашивает контакт пользователя"""
-        keyboard = self.create_keyboard([[
+        keyboard = create_keyboard([[
             {'type': 'contact', 'text': '📇 Отправить контакт'}
         ]])
 
@@ -99,7 +65,7 @@ class RegistrationHandler:
 
     async def send_phone_confirmation(self, bot_instance: Bot, chat_id: int, phone: str):
         """Отправляет сообщение с подтверждением номера телефона"""
-        keyboard = self.create_keyboard([[
+        keyboard = create_keyboard([[
             {'type': 'callback', 'text': '✅ Да, номер верный', 'payload': CONFIRM_PHONE_CALLBACK},
             {'type': 'callback', 'text': '❌ Нет, неверный номер', 'payload': REJECT_PHONE_CALLBACK}
         ]])
@@ -146,7 +112,7 @@ class RegistrationHandler:
 
         log_data_event(str(chat_id), "confirmation_prepared", fio=fio, birth_date=birth_date, phone=phone)
 
-        keyboard = self.create_keyboard([
+        keyboard = create_keyboard([
             [{'type': 'callback', 'text': '⚠️ Исправить ФИО', 'payload': CORRECT_FIO_CALLBACK}],
             [{'type': 'callback', 'text': '⚠️ Исправить дату рождения', 'payload': CORRECT_BIRTH_DATE_CALLBACK}],
             [{'type': 'callback', 'text': '✅ Всё верно, подтвердить', 'payload': CONFIRM_DATA_CALLBACK}]

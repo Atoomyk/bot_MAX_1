@@ -53,8 +53,9 @@ class MaskingFilter(logging.Filter):
                 record.msg = re.sub(fio_pattern,
                                     lambda m: self.mask_fio(m.group(1)),
                                     record.msg)
-        except Exception:
-            pass
+        except Exception as e:
+            # Логируем ошибку маскирования, но не прерываем логирование
+            logging.getLogger(__name__).warning(f"Ошибка маскирования данных: {e}")
         return True
 
 
@@ -74,7 +75,7 @@ def setup_logging():
 
     # Форматтер для логов
     formatter = logging.Formatter(
-        '%(asctime)s %(levelname)s %(message)s',
+        '%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 

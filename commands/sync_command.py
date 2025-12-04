@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from maxapi.types import MessageCreated
 
 from sync_appointments.service import SyncService
+from logging_config import log_system_event
 
 logger = logging.getLogger(__name__)
 
@@ -34,16 +35,17 @@ class SyncCommandHandler:
         Обрабатывает сообщение, проверяя админские команды.
         """
         try:
-
             # Используем chat_id из recipient
             chat_id = event.message.recipient.chat_id
 
             # Проверяем, что это сообщение от администратора (по chat_id)
             if chat_id != self.admin_id:
+                logger.debug(f"Команда от не-админа: chat_id={chat_id}, admin_id={self.admin_id}")
                 return False
 
             # Проверяем наличие текста сообщения
             if not event.message.body or not event.message.body.text:
+                logger.debug("Нет текста в сообщении")
                 return False
 
             message_text = event.message.body.text.strip()
@@ -68,14 +70,11 @@ class SyncCommandHandler:
             elif message_text.startswith("/admin_sync_mock"):
                 await self._handle_mock_command(event, message_text)
                 return True
-
-            print(f"SYNC COMMAND DEBUG: Неизвестная команда")
+            logger.debug(f"Неизвестная команда от админа: {message_text}")
             return False
 
         except Exception as e:
-            print(f"SYNC COMMAND DEBUG: Ошибка: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка обработки команды синхронизации: {e}", exc_info=True)
             return False
 
 
@@ -84,9 +83,13 @@ class SyncCommandHandler:
         Обрабатывает команду /admin_sync.
         """
         try:
+            chat_id = event.message.recipient.chat_id
+            log_system_event("admin_sync", "sync_started", chat_id=str(chat_id))
+            
             if self.is_syncing:
+                log_system_event("admin_sync", "sync_already_running", chat_id=str(chat_id))
                 await event.bot.send_message(
-                    chat_id=event.message.recipient.chat_id,
+                    chat_id=chat_id,
                     text="⏳ Синхронизация уже выполняется. Пожалуйста, подождите."
                 )
                 return
@@ -95,7 +98,7 @@ class SyncCommandHandler:
 
             # Отправляем сообщение о начале
             await event.bot.send_message(
-                chat_id=event.message.recipient.chat_id,
+                chat_id=chat_id,
                 text="🔄 Запуск ручной синхронизации записей к врачу..."
             )
 
@@ -105,6 +108,12 @@ class SyncCommandHandler:
             # Формируем отчет
             if result.get('success'):
                 summary = result.get('summary', {})
+                log_system_event("admin_sync", "sync_completed", 
+                               total_received=summary.get('total_received', 0),
+                               matched=summary.get('patients_matched', 0),
+                               saved=summary.get('new_appointments_saved', 0),
+                               duration=result.get('duration_seconds', 0),
+                               chat_id=str(chat_id))
                 message = (
                     "✅ Синхронизация завершена успешно!\n\n"
                     f"📊 Результаты:\n"
@@ -116,14 +125,16 @@ class SyncCommandHandler:
                     f"⏰ Время завершения: {result.get('timestamp', 'неизвестно')}"
                 )
             else:
+                error_msg = result.get('error', 'Неизвестная ошибка')
+                log_system_event("admin_sync", "sync_failed", error=error_msg, chat_id=str(chat_id))
                 message = (
                     "❌ Синхронизация завершена с ошибкой!\n\n"
-                    f"Ошибка: {result.get('error', 'Неизвестная ошибка')}\n"
+                    f"Ошибка: {error_msg}\n"
                     f"Время выполнения: {result.get('duration_seconds', 0):.2f} сек"
                 )
 
             await event.bot.send_message(
-                chat_id=event.message.recipient.chat_id,
+                chat_id=chat_id,
                 text=message
             )
 
@@ -141,6 +152,8 @@ class SyncCommandHandler:
         Обрабатывает команду /admin_sync_status.
         """
         try:
+            chat_id = event.message.recipient.chat_id
+            log_system_event("admin_sync", "status_requested", chat_id=str(chat_id))
             status = self.sync_service.get_status()
 
             last_sync = status.get('last_sync_time', 'никогда')
@@ -152,7 +165,7 @@ class SyncCommandHandler:
             message = (
                 "📊 Статус системы синхронизации:\n\n"
                 f"🕐 Последняя синхронизация: {last_sync}\n"
-                f"📈 Результат: {last_sync}\n\n"
+                f"📈 Результат: {last_success}\n\n"
                 f"🗃️ База данных записей:\n"
                 f"• Всего записей: {db_stats.get('total_appointments', 0)}\n"
                 f"• Уникальных пользователей: {db_stats.get('unique_users', 0)}\n"
@@ -176,27 +189,37 @@ class SyncCommandHandler:
         Обрабатывает команду /admin_sync_cleanup.
         """
         try:
+            chat_id = event.message.recipient.chat_id
+            log_system_event("admin_sync", "cleanup_started", chat_id=str(chat_id))
+            
             await event.bot.send_message(
-                chat_id=event.message.recipient.chat_id,
+                chat_id=chat_id,
                 text="🗑️ Запуск очистки старых записей (старше 1 года)..."
             )
 
             result = await self.sync_service.run_cleanup(days_to_keep=365)
 
             if result.get('success'):
+                deleted_count = result.get('deleted_count', 0)
+                log_system_event("admin_sync", "cleanup_completed", 
+                               deleted_count=deleted_count,
+                               duration=result.get('duration_seconds', 0),
+                               chat_id=str(chat_id))
                 message = (
                     "✅ Очистка завершена успешно!\n\n"
-                    f"🗑️ Удалено записей: {result.get('deleted_count', 0)}\n"
+                    f"🗑️ Удалено записей: {deleted_count}\n"
                     f"⏱️ Время выполнения: {result.get('duration_seconds', 0):.2f} сек"
                 )
             else:
+                error_msg = result.get('error', 'Неизвестная ошибка')
+                log_system_event("admin_sync", "cleanup_failed", error=error_msg, chat_id=str(chat_id))
                 message = (
                     "❌ Очистка завершена с ошибкой!\n\n"
-                    f"Ошибка: {result.get('error', 'Неизвестная ошибка')}"
+                    f"Ошибка: {error_msg}"
                 )
 
             await event.bot.send_message(
-                chat_id=event.message.recipient.chat_id,
+                chat_id=chat_id,
                 text=message
             )
 
@@ -212,6 +235,8 @@ class SyncCommandHandler:
         Обрабатывает команду /admin_sync_stats.
         """
         try:
+            chat_id = event.message.recipient.chat_id
+            log_system_event("admin_sync", "stats_requested", chat_id=str(chat_id))
             status = self.sync_service.get_status()
             components = status.get('components_status', {})
 
@@ -258,20 +283,24 @@ class SyncCommandHandler:
         Обрабатывает команду /admin_sync_mock [путь_к_файлу].
         """
         try:
+            chat_id = event.message.recipient.chat_id
             # Извлекаем путь к файлу из команды
             parts = message_text.split()
             if len(parts) < 2:
+                log_system_event("admin_sync", "mock_invalid_command", command=message_text, chat_id=str(chat_id))
                 await event.bot.send_message(
-                    chat_id=event.message.recipient.chat_id,
+                    chat_id=chat_id,
                     text="❌ Укажите путь к мок-файлу: /admin_sync_mock [путь_к_файлу]"
                 )
                 return
 
             mock_file_path = parts[1]
+            log_system_event("admin_sync", "mock_started", file_path=mock_file_path, chat_id=str(chat_id))
 
             if self.is_syncing:
+                log_system_event("admin_sync", "mock_already_running", chat_id=str(chat_id))
                 await event.bot.send_message(
-                    chat_id=event.message.recipient.chat_id,
+                    chat_id=chat_id,
                     text="⏳ Синхронизация уже выполняется. Пожалуйста, подождите."
                 )
                 return
@@ -279,7 +308,7 @@ class SyncCommandHandler:
             self.is_syncing = True
 
             await event.bot.send_message(
-                chat_id=event.message.recipient.chat_id,
+                chat_id=chat_id,
                 text=f"🧪 Запуск тестовой синхронизации с мок-данными из {mock_file_path}..."
             )
 
@@ -339,6 +368,7 @@ class SyncCommandHandler:
             # Обработка callback-ов администратора для управления синхронизацией
             if payload.startswith("sync_"):
                 action = payload.split(":")[0] if ":" in payload else payload
+                log_system_event("admin_callback", "sync_action", action=action, chat_id=str(chat_id))
 
                 if action == "sync_start":
                     await self._handle_sync_command(event)

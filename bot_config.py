@@ -1,6 +1,7 @@
 # bot_config.py
 """Конфигурация и инициализация бота"""
 import os
+from typing import Optional
 from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
@@ -66,16 +67,16 @@ GOSUSLUGI_MEDICAL_EXAM_URL = "https://www.gosuslugi.ru/647521/1/form"
 GOSUSLUGI_DOCTOR_HOME_URL = "https://www.gosuslugi.ru/600361"
 GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL = "https://www.gosuslugi.ru/600360"
 CONTACT_CENTER_URL = "https://sevmiac.ru/ekc/"
-MAP_OF_MEDICAL_INSTITUTIONS_URL = "https://yandex.ru/maps/959/"
+MAP_OF_MEDICAL_INSTITUTIONS_URL = "https://yandex.ru/maps/959/sevastopol/search/%D0%91%D0%BE%D0%BB%D1%8C%D0%BD%D0%B8%D1%86%D1%8B%20%D0%B2%20%D1%81%D0%B5%D0%B2%D0%B0%D1%81%D1%82%D0%BE%D0%BF%D0%BE%D0%BB%D0%B5/?ll=33.567033%2C44.573119&sctx=ZAAAAAgCEAAaKAoSCadZoN0hw0BAEUnXTL7ZTkZAEhIJUHEceLVc5j8RKsdkcf8R6D8iBgABAgMEBSgKOABAvwdIAWoCcnWdAc3MzD2gAQCoAQC9AUiRBS%2FCAYoBiNKFmATv5uOzBJjPl5qAAo%2BevdYEwZ%2Bw4gPU7PqeBOi14pEEwauvqgS8ib%2FOiAW%2F3bm7BLiO%2FskE%2FdajkLUCkJjwtQaq8ezXBtbjiYLaBZzM9ssGr8ub4MIEx%2BiRm5oD4P2F1MoDrPT1i9gGktWn1IYBtvLJkM0El4aU98IEiuHzlv8G14e%2Fr%2BkGggIq0JHQvtC70YzQvdC40YbRiyDQsiDRgdC10LLQsNGB0YLQvtC%2F0L7Qu9C1igIsMTg0MTA1OTU2JDE4NDEwNTk1OCQ1MzQzNzI2MDU1OSQxOTgzOTUyODk1NDKSAgM5NTmaAgxkZXNrdG9wLW1hcHOqAgwxNjU3NDI5MTg5Mzk%3D&sll=33.567033%2C44.573119&sspn=0.364266%2C0.147111&z=12.4"
 
 # Глобальные переменные
 user_states = {}
 processed_events = {}
 
 # Глобальные переменные для синхронизации записей
-sync_service = None
-sync_command_handler = None
-scheduler_manager = None
+sync_service: Optional[SyncService] = None
+sync_command_handler: Optional[SyncCommandHandler] = None
+scheduler_manager: Optional[SchedulerManager] = None
 
 
 def init_sync_service():

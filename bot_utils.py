@@ -10,13 +10,25 @@ from maxapi.utils.inline_keyboard import AttachmentType
 
 from logging_config import log_system_event
 
-# Константы URL (определены здесь, чтобы избежать циклического импорта)
-GOSUSLUGI_APPOINTMENT_URL = "https://www.gosuslugi.ru/10700"
-GOSUSLUGI_MEDICAL_EXAM_URL = "https://www.gosuslugi.ru/647521/1/form"
-GOSUSLUGI_DOCTOR_HOME_URL = "https://www.gosuslugi.ru/600361"
-GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL = "https://www.gosuslugi.ru/600360"
-CONTACT_CENTER_URL = "https://sevmiac.ru/ekc/"
-MAP_OF_MEDICAL_INSTITUTIONS_URL = "https://yandex.ru/maps/959/"
+# Импортируем константы URL из bot_config (ленивый импорт, чтобы избежать циклического импорта)
+def _get_url_constants():
+    """Получает константы URL из bot_config (ленивый импорт)"""
+    from bot_config import (
+        GOSUSLUGI_APPOINTMENT_URL,
+        GOSUSLUGI_MEDICAL_EXAM_URL,
+        GOSUSLUGI_DOCTOR_HOME_URL,
+        GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL,
+        CONTACT_CENTER_URL,
+        MAP_OF_MEDICAL_INSTITUTIONS_URL
+    )
+    return {
+        'GOSUSLUGI_APPOINTMENT_URL': GOSUSLUGI_APPOINTMENT_URL,
+        'GOSUSLUGI_MEDICAL_EXAM_URL': GOSUSLUGI_MEDICAL_EXAM_URL,
+        'GOSUSLUGI_DOCTOR_HOME_URL': GOSUSLUGI_DOCTOR_HOME_URL,
+        'GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL': GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL,
+        'CONTACT_CENTER_URL': CONTACT_CENTER_URL,
+        'MAP_OF_MEDICAL_INSTITUTIONS_URL': MAP_OF_MEDICAL_INSTITUTIONS_URL
+    }
 
 
 # --- УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ---
@@ -206,11 +218,12 @@ async def setup_webhook():
 
 def create_main_menu_keyboard():
     """Создает клавиатуру главного меню"""
+    urls = _get_url_constants()
     buttons_config = [
-        [{'type': 'link', 'text': 'Записаться на приём к врачу', 'url': GOSUSLUGI_APPOINTMENT_URL}],
-        [{'type': 'link', 'text': 'Профосмотр/диспансеризация', 'url': GOSUSLUGI_MEDICAL_EXAM_URL}],
-        [{'type': 'link', 'text': 'Вызов врача на дом', 'url': GOSUSLUGI_DOCTOR_HOME_URL}],
-        [{'type': 'link', 'text': 'Прикрепление к поликлинике', 'url': GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL}],
+        [{'type': 'link', 'text': 'Записаться на приём к врачу', 'url': urls['GOSUSLUGI_APPOINTMENT_URL']}],
+        [{'type': 'link', 'text': 'Профосмотр/диспансеризация', 'url': urls['GOSUSLUGI_MEDICAL_EXAM_URL']}],
+        [{'type': 'link', 'text': 'Вызов врача на дом', 'url': urls['GOSUSLUGI_DOCTOR_HOME_URL']}],
+        [{'type': 'link', 'text': 'Прикрепление к поликлинике', 'url': urls['GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL']}],
         [{'type': 'callback', 'text': '🔍 Другие возможности', 'payload': "other_options"}]
     ]
     return create_keyboard(buttons_config)
@@ -218,9 +231,10 @@ def create_main_menu_keyboard():
 
 def create_other_options_keyboard():
     """Создает клавиатуру меню 'Другие возможности'"""
+    urls = _get_url_constants()
     buttons_config = [
-        [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': MAP_OF_MEDICAL_INSTITUTIONS_URL}],
-        [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': CONTACT_CENTER_URL}],
+        [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': urls['MAP_OF_MEDICAL_INSTITUTIONS_URL']}],
+        [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': urls['CONTACT_CENTER_URL']}],
         [{'type': 'callback', 'text': '🔔 Настройки напоминаний', 'payload': "reminders_settings"}],
         [{'type': 'callback', 'text': '💬 Онлайн чат с поддержкой', 'payload': "support_request"}],
         [{'type': 'callback', 'text': '⬅️ Назад', 'payload': "back_to_main"}]
@@ -240,9 +254,10 @@ async def send_main_menu(bot_instance: Bot, chat_id: int, greeting_name: str):
 
 async def send_other_options_menu(bot_instance: Bot, chat_id: int):
     """Отправляет меню 'Другие возможности'"""
+    urls = _get_url_constants()
     keyboard = create_keyboard([
-        [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': MAP_OF_MEDICAL_INSTITUTIONS_URL}],
-        [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': CONTACT_CENTER_URL}],
+        [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': urls['MAP_OF_MEDICAL_INSTITUTIONS_URL']}],
+        [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': urls['CONTACT_CENTER_URL']}],
         [{'type': 'callback', 'text': '🔔 Настройки напоминаний', 'payload': "reminders_settings"}],
         [{'type': 'callback', 'text': '💬 Онлайн чат с поддержкой', 'payload': "support_request"}],
         [{'type': 'callback', 'text': '⬅️ Назад', 'payload': "back_to_main"}]

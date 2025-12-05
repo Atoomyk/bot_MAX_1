@@ -67,7 +67,9 @@ def setup_logging():
         os.makedirs(log_dir)
 
     logger = logging.getLogger()
-    logger.setLevel(USER_LEVEL)  # Минимальный уровень - USER
+    # Устанавливаем минимальный уровень на самый низкий из используемых (TRANSPORT_LEVEL = 21)
+    # чтобы все логи (TRANSPORT, SECURITY, DATA, SYSTEM, USER) записывались
+    logger.setLevel(TRANSPORT_LEVEL)
 
     # Очищаем существующие обработчики
     for handler in logger.handlers[:]:
@@ -87,12 +89,14 @@ def setup_logging():
         backupCount=30,
         encoding='utf-8'
     )
-    file_handler.setLevel(USER_LEVEL)
+    # Устанавливаем минимальный уровень для файла на TRANSPORT_LEVEL, чтобы все логи записывались
+    file_handler.setLevel(TRANSPORT_LEVEL)
     file_handler.setFormatter(formatter)
     file_handler.suffix = '%Y-%m-%d'
 
     # Обработчик для консоли
     console_handler = logging.StreamHandler()
+    # Для консоли можно оставить USER_LEVEL, чтобы не засорять вывод
     console_handler.setLevel(USER_LEVEL)
     console_handler.setFormatter(formatter)
 

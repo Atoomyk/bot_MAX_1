@@ -1,12 +1,9 @@
 import os
 import re
-import logging
 from datetime import datetime
 import psycopg2
 from dotenv import load_dotenv
-
-# Настройка логгирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from logging_config import log_system_event
 
 load_dotenv()
 
@@ -39,9 +36,9 @@ class UserDatabase:
                 port=DB_PORT
             )
             self.cursor = self.conn.cursor()
-            logging.info("INFO: Успешное подключение к PostgreSQL для UserDatabase.")
+            log_system_event("database", "user_db_connected")
         except psycopg2.Error as e:
-            logging.error(f"ERROR: Не удалось подключиться к PostgreSQL: {e}")
+            log_system_event("database", "user_db_connection_failed", error=str(e))
 
     # ---------------------------------------------------------------------
     # Инициализация таблицы users
@@ -66,9 +63,9 @@ class UserDatabase:
             self._add_column_if_not_exists('registration_date', 'TEXT')
 
             self.conn.commit()
-            logging.info("INFO: Таблица users проверена/создана.")
+            log_system_event("database", "users_table_initialized")
         except psycopg2.Error as e:
-            logging.error(f"ERROR: Ошибка при инициализации таблицы users: {e}")
+            log_system_event("database", "users_table_init_error", error=str(e))
             if self.conn:
                 self.conn.rollback()
 
@@ -109,9 +106,9 @@ class UserDatabase:
                         ALTER TABLE user_reminders 
                         RENAME COLUMN user_id TO chat_id
                     """)
-                    logging.info("INFO: Колонка user_id переименована в chat_id в таблице user_reminders")
+                    log_system_event("database", "reminders_column_renamed", column="user_id->chat_id")
             except psycopg2.Error as e:
-                logging.warning(f"WARNING: Не удалось переименовать колонку user_id: {e}")
+                log_system_event("database", "reminders_column_rename_failed", error=str(e))
                 # Продолжаем работу, возможно колонка уже переименована или не существует
             
             # Миграция: добавляем внешний ключ, если его нет
@@ -133,15 +130,15 @@ class UserDatabase:
                         REFERENCES users(chat_id)
                         ON DELETE CASCADE
                     """)
-                    logging.info("INFO: Добавлен внешний ключ fk_user_reminders_user в таблице user_reminders")
+                    log_system_event("database", "reminders_foreign_key_added", constraint="fk_user_reminders_user")
             except psycopg2.Error as e:
-                logging.warning(f"WARNING: Не удалось добавить внешний ключ: {e}")
+                log_system_event("database", "reminders_foreign_key_failed", error=str(e))
                 # Продолжаем работу, возможно ключ уже существует
             
             self.conn.commit()
-            logging.info("INFO: Таблица user_reminders проверена/создана.")
+            log_system_event("database", "reminders_table_initialized")
         except psycopg2.Error as e:
-            logging.error(f"ERROR: Не удалось создать таблицу user_reminders: {e}")
+            log_system_event("database", "reminders_table_init_error", error=str(e))
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
@@ -167,10 +164,10 @@ class UserDatabase:
                 (chat_id,)
             )
             self.conn.commit()
-            logging.info(f"INFO: Создана запись user_reminders для пользователя {chat_id}")
+            log_system_event("database", "reminder_record_created", chat_id=chat_id)
 
         except psycopg2.Error as e:
-            logging.error(f"ERROR: init_user_reminder_record: {e}")
+            log_system_event("database", "reminder_record_create_error", error=str(e), chat_id=chat_id)
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
@@ -196,7 +193,7 @@ class UserDatabase:
             return row[0]
 
         except psycopg2.Error as e:
-            logging.error(f"ERROR: get_reminders_status: {e}")
+            log_system_event("database", "get_reminders_status_error", error=str(e), chat_id=chat_id)
             return True  # безопасное значение по умолчанию
 
     # ---------------------------------------------------------------------
@@ -214,10 +211,10 @@ class UserDatabase:
                 (chat_id, enabled)
             )
             self.conn.commit()
-            logging.info(f"INFO: Уведомления пользователя {chat_id} → {enabled}")
+            log_system_event("database", "reminders_status_updated", chat_id=chat_id, enabled=enabled)
 
         except psycopg2.Error as e:
-            logging.error(f"ERROR: set_reminders_status: {e}")
+            log_system_event("database", "reminders_status_update_error", error=str(e), chat_id=chat_id)
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
@@ -234,9 +231,9 @@ class UserDatabase:
             if not self.cursor.fetchone():
                 add_column_query = f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"
                 self.cursor.execute(add_column_query)
-                logging.info(f"INFO: Добавлена колонка {column_name} в таблицу users.")
+                log_system_event("database", "users_column_added", column=column_name)
         except psycopg2.Error as e:
-            logging.error(f"ERROR: Ошибка при добавлении колонки {column_name}: {e}")
+            log_system_event("database", "users_column_add_error", error=str(e), column=column_name)
             if self.conn:
                 self.conn.rollback()
 
@@ -247,7 +244,7 @@ class UserDatabase:
             self.cursor.execute("SELECT 1 FROM users WHERE chat_id = %s", (chat_id,))
             return self.cursor.fetchone() is not None
         except psycopg2.Error as e:
-            logging.error(f"ERROR: Database query failed: {e}")
+            log_system_event("database", "query_failed", error=str(e), chat_id=chat_id)
             return False
 
     def get_user_greeting(self, chat_id: str) -> str:
@@ -327,7 +324,7 @@ class UserDatabase:
             return True
 
         except psycopg2.Error as e:
-            logging.error(f"ERROR: User registration failed: {e}")
+            log_system_event("database", "user_registration_failed", error=str(e), chat_id=chat_id)
             self.conn.rollback()
             return False
 

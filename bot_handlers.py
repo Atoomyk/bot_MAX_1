@@ -68,7 +68,8 @@ async def message_callback(event: MessageCallback):
         chat_id_str = str(chat_id)
         payload = event.callback.payload
 
-        log_user_event(chat_id_str, "button_pressed", payload=payload)
+        # Логирование button_pressed будет происходить только для неизвестных payload
+        # Специфичные события логируются в соответствующих обработчиках
 
         # Обработка callback-ов для записей к врачу
         if payload.startswith("view_appointment:"):
@@ -292,11 +293,11 @@ async def message_callback(event: MessageCallback):
             await registration_handler.start_registration_process(event.bot, chat_id)
 
         elif payload == "confirm_phone":
-            log_user_event(chat_id_str, "phone_confirmed")
+            # Логирование phone_confirmed происходит в handle_phone_confirmation
             await registration_handler.handle_phone_confirmation(event.bot, chat_id_str, chat_id)
 
         elif payload == "reject_phone":
-            log_user_event(chat_id_str, "phone_rejected")
+            # Логирование phone_rejected происходит в handle_incorrect_phone
             await registration_handler.handle_incorrect_phone(event.bot, chat_id)
 
         elif payload == "correct_fio":
@@ -415,16 +416,24 @@ async def handle_message(event: MessageCreated):
         is_admin = (chat_id == ADMIN_ID) if ADMIN_ID else False
 
         # Обработка админских команд для синхронизации
+        # Проверяем только команды, начинающиеся с /admin_, чтобы не обрабатывать обычные сообщения админа
         if is_admin and event.message.body and event.message.body.text:
             message_text = event.message.body.text.strip()
             
-            # Импортируем sync_command_handler динамически, так как он может быть инициализирован позже
-            from bot_config import sync_command_handler
-            
-            if sync_command_handler:
-                handled = await sync_command_handler.handle_message(event)
-                if handled:
-                    return
+            # Обрабатываем только команды синхронизации
+            if message_text.startswith("/admin_"):
+                log_system_event("admin_command", "command_received", command=message_text, chat_id=chat_id_str)
+                
+                # Импортируем sync_command_handler динамически, так как он может быть инициализирован позже
+                from bot_config import sync_command_handler
+                
+                if sync_command_handler:
+                    handled = await sync_command_handler.handle_message(event)
+                    if handled:
+                        log_system_event("admin_command", "command_handled", command=message_text, chat_id=chat_id_str)
+                        return
+                else:
+                    log_system_event("admin_command", "sync_handler_not_available", command=message_text, chat_id=chat_id_str)
 
             # Обработка сообщений администратора через support_handler
             processed = await support_handler.process_admin_message(event.bot, chat_id, message_text)

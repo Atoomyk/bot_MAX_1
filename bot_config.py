@@ -13,17 +13,18 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import AttachmentType
 
+from logging_config import setup_logging, log_system_event
+
+# Настройка логирования ДО импорта других модулей
+setup_logging()
+
 from support_handler import init_support_handler
 from registration_handler import RegistrationHandler
 from reminder_handler import ReminderHandler
-from logging_config import setup_logging, log_system_event
 from sync_appointments.service import SyncService
 from sync_appointments.scheduler import SchedulerManager
 from commands.sync_command import SyncCommandHandler
 from user_database import db
-
-# Настройка логирования
-setup_logging()
 
 # Загрузка переменных окружения
 load_dotenv()

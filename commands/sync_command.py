@@ -3,14 +3,11 @@
 Обработчик команды /admin_sync для ручного запуска синхронизации.
 """
 
-import logging
 from typing import Optional, Dict, Any
 from maxapi.types import MessageCreated
 
 from sync_appointments.service import SyncService
 from logging_config import log_system_event
-
-logger = logging.getLogger(__name__)
 
 
 class SyncCommandHandler:
@@ -40,12 +37,12 @@ class SyncCommandHandler:
 
             # Проверяем, что это сообщение от администратора (по chat_id)
             if chat_id != self.admin_id:
-                logger.debug(f"Команда от не-админа: chat_id={chat_id}, admin_id={self.admin_id}")
+                log_system_event("admin_command", "non_admin_attempt", chat_id=str(chat_id), admin_id=str(self.admin_id))
                 return False
 
             # Проверяем наличие текста сообщения
             if not event.message.body or not event.message.body.text:
-                logger.debug("Нет текста в сообщении")
+                log_system_event("admin_command", "no_text_in_message", chat_id=str(chat_id))
                 return False
 
             message_text = event.message.body.text.strip()
@@ -70,11 +67,12 @@ class SyncCommandHandler:
             elif message_text.startswith("/admin_sync_mock"):
                 await self._handle_mock_command(event, message_text)
                 return True
-            logger.debug(f"Неизвестная команда от админа: {message_text}")
+            
+            log_system_event("admin_command", "unknown_sync_command", command=message_text, chat_id=str(chat_id))
             return False
 
         except Exception as e:
-            logger.error(f"Ошибка обработки команды синхронизации: {e}", exc_info=True)
+            log_system_event("admin_command", "sync_command_error", error=str(e), chat_id=str(chat_id))
             return False
 
 
@@ -139,7 +137,7 @@ class SyncCommandHandler:
             )
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды /admin_sync: {e}")
+            log_system_event("admin_sync", "sync_command_exception", error=str(e), chat_id=str(chat_id))
             await event.bot.send_message(
                 chat_id=event.message.recipient.chat_id,
                 text=f"❌ Произошла ошибка при выполнении синхронизации: {str(e)}"
@@ -178,7 +176,7 @@ class SyncCommandHandler:
             )
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды /admin_sync_status: {e}")
+            log_system_event("admin_sync", "status_command_exception", error=str(e), chat_id=str(chat_id))
             await event.bot.send_message(
                 chat_id=event.message.recipient.chat_id,
                 text=f"❌ Ошибка получения статуса: {str(e)}"
@@ -224,7 +222,7 @@ class SyncCommandHandler:
             )
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды /admin_sync_cleanup: {e}")
+            log_system_event("admin_sync", "cleanup_command_exception", error=str(e), chat_id=str(chat_id))
             await event.bot.send_message(
                 chat_id=event.message.recipient.chat_id,
                 text=f"❌ Ошибка очистки: {str(e)}"
@@ -272,7 +270,7 @@ class SyncCommandHandler:
             )
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды /admin_sync_stats: {e}")
+            log_system_event("admin_sync", "stats_command_exception", error=str(e), chat_id=str(chat_id))
             await event.bot.send_message(
                 chat_id=event.message.recipient.chat_id,
                 text=f"❌ Ошибка получения статистики: {str(e)}"
@@ -339,7 +337,7 @@ class SyncCommandHandler:
             )
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды /admin_sync_mock: {e}")
+            log_system_event("admin_sync", "mock_command_exception", error=str(e), chat_id=str(chat_id))
             await event.bot.send_message(
                 chat_id=event.message.recipient.chat_id,
                 text=f"❌ Ошибка тестовой синхронизации: {str(e)}"
@@ -383,5 +381,5 @@ class SyncCommandHandler:
             return False
 
         except Exception as e:
-            logger.error(f"Ошибка обработки callback: {e}")
+            log_system_event("admin_callback", "sync_callback_error", error=str(e), chat_id=str(chat_id))
             return False

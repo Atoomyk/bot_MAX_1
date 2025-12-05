@@ -259,7 +259,18 @@ async def message_callback(event: MessageCallback):
         elif payload == "cancel_appointment_back":
             # Возврат в главное меню
             log_user_event(chat_id_str, "appointment_cancel_cancelled")
-            await send_main_menu(event.bot, chat_id)
+            if db.is_user_registered(chat_id_str):
+                greeting_name = db.get_user_greeting(chat_id_str)
+                await send_main_menu(event.bot, chat_id, greeting_name)
+            else:
+                keyboard = create_keyboard([[
+                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+                ]])
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="Для использования бота необходимо зарегистрироваться.",
+                    attachments=[keyboard] if keyboard else []
+                )
             return
 
         # Обработка админских callback для синхронизации

@@ -415,13 +415,28 @@ async def handle_message(event: MessageCreated):
 
         is_admin = (chat_id == ADMIN_ID) if ADMIN_ID else False
 
+        if not event.message.body:
+            return
+
+        # Получаем attachments из сообщения
+        attachments = event.message.body.attachments if hasattr(event.message.body, 'attachments') else None
+        
+        # Проверяем наличие изображений в attachments
+        has_image = False
+        if attachments:
+            for attachment in attachments:
+                if hasattr(attachment, 'type'):
+                    if attachment.type == "image" or (hasattr(attachment, 'type') and str(attachment.type).lower() == "image"):
+                        has_image = True
+                        break
+
         # Обработка админских команд для синхронизации
         # Проверяем только команды, начинающиеся с /admin_, чтобы не обрабатывать обычные сообщения админа
-        if is_admin and event.message.body and event.message.body.text:
-            message_text = event.message.body.text.strip()
+        if is_admin and event.message.body:
+            message_text = event.message.body.text.strip() if event.message.body.text else ""
             
-            # Обрабатываем только команды синхронизации
-            if message_text.startswith("/admin_"):
+            # Обрабатываем только команды синхронизации (если есть текст)
+            if message_text and message_text.startswith("/admin_"):
                 log_system_event("admin_command", "command_received", command=message_text, chat_id=chat_id_str)
                 
                 # Импортируем sync_command_handler динамически, так как он может быть инициализирован позже
@@ -435,14 +450,15 @@ async def handle_message(event: MessageCreated):
                 else:
                     log_system_event("admin_command", "sync_handler_not_available", command=message_text, chat_id=chat_id_str)
 
-            # Обработка сообщений администратора через support_handler
-            processed = await support_handler.process_admin_message(event.bot, chat_id, message_text)
-            if processed:
-                log_system_event("admin_command", "handled_by_support", command=message_text, chat_id=chat_id_str)
-                return
-
-        if not event.message.body:
-            return
+            # Обработка сообщений администратора через support_handler (включая изображения)
+            # Обрабатываем если есть текст или изображение
+            if message_text or has_image:
+                processed = await support_handler.process_admin_message(
+                    event.bot, chat_id, message_text, attachments
+                )
+                if processed:
+                    log_system_event("admin_command", "handled_by_support", command=message_text or "[изображение]", chat_id=chat_id_str)
+                    return
 
         if event.message.body.attachments:
             contact_processed = await registration_handler.process_contact_message(
@@ -454,17 +470,17 @@ async def handle_message(event: MessageCreated):
         if not event.message.sender:
             return
 
-        if not event.message.body.text:
-            return
-
-        message_text = event.message.body.text.strip()
-        if not message_text:
+        # Получаем текст сообщения (может быть пустым, если только изображение)
+        message_text = event.message.body.text.strip() if event.message.body.text else ""
+        
+        # Пропускаем обработку, если нет ни текста, ни изображения
+        if not message_text and not has_image:
             return
 
         # Логируем сообщения пользователей (но не команды админа, они уже залогированы выше)
         is_admin_msg = (chat_id == ADMIN_ID) if ADMIN_ID else False
-        if not (is_admin_msg and message_text.startswith("/")):
-            log_user_event(chat_id_str, "message_sent", text=message_text)
+        if not (is_admin_msg and message_text and message_text.startswith("/")):
+            log_user_event(chat_id_str, "message_sent", text=message_text or "[изображение]")
 
         if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
             log_user_event(chat_id_str, "message_ignored_unregistered")
@@ -478,14 +494,19 @@ async def handle_message(event: MessageCreated):
             )
             return
 
-        registration_processed = await registration_handler.process_text_input(
-            chat_id_str, message_text, event.bot, chat_id
+        # Обработка регистрации только если есть текст (не обрабатываем только изображения)
+        if message_text:
+            registration_processed = await registration_handler.process_text_input(
+                chat_id_str, message_text, event.bot, chat_id
+            )
+
+            if registration_processed:
+                return
+
+        # Обработка сообщений в чате поддержки (включая изображения)
+        chat_processed = await support_handler.process_user_message(
+            event.bot, chat_id, message_text, attachments
         )
-
-        if registration_processed:
-            return
-
-        chat_processed = await support_handler.process_user_message(event.bot, chat_id, message_text)
         if chat_processed:
             return
 

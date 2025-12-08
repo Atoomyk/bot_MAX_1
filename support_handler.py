@@ -9,6 +9,8 @@ from dataclasses import dataclass, asdict
 import time
 
 from dotenv import load_dotenv
+from maxapi.types import Attachment, OtherAttachmentPayload
+from maxapi.utils.inline_keyboard import AttachmentType
 
 # Импорт системы логирования
 from logging_config import log_user_event, log_system_event, log_security_event
@@ -33,6 +35,7 @@ class ChatMessage:
     from_user: str  # "user" или "admin"
     text: str
     time: str
+    image_url: Optional[str] = None  # URL изображения, если есть
 
 
 @dataclass
@@ -182,7 +185,8 @@ class SupportHandler:
                     {
                         "from": msg.from_user,
                         "text": msg.text,
-                        "time": msg.time
+                        "time": msg.time,
+                        "image_url": msg.image_url
                     }
                     for msg in chat_log.messages
                 ]
@@ -380,9 +384,34 @@ class SupportHandler:
 
                     for msg in messages_queue:
                         try:
+                            # Поддерживаем как старый формат (строка), так и новый (словарь)
+                            if isinstance(msg, dict):
+                                message_text = msg.get('text', '[Изображение]')
+                                image_url = msg.get('image_url')
+                            else:
+                                message_text = msg
+                                image_url = None
+                            
+                            message_text_to_send = f"👤 Пользователь: {message_text}"
+                            
+                            # Формируем attachments для пересылки изображения
+                            message_attachments = []
+                            if image_url:
+                                try:
+                                    image_attachment = Attachment(
+                                        type=AttachmentType.IMAGE,
+                                        payload=OtherAttachmentPayload(url=image_url)
+                                    )
+                                    message_attachments.append(image_attachment)
+                                except Exception as e:
+                                    log_system_event("support_chat", "create_image_attachment_error",
+                                                   error=str(e), user_id=user_id)
+                                    message_text_to_send += f"\n\n📷 Изображение: {image_url}"
+                            
                             await bot.send_message(
                                 chat_id=admin_id,
-                                text=f"👤 Пользователь: {msg}"
+                                text=message_text_to_send,
+                                attachments=message_attachments if message_attachments else []
                             )
                         except Exception as e:
                             log_system_event("support_chat", "send_queued_message_error",
@@ -419,7 +448,43 @@ class SupportHandler:
             # все равно возвращаем True, так как подключение фактически состоялось
             return success_message_sent
 
-    async def process_user_message(self, bot, user_id: int, message_text: str) -> bool:
+    def _extract_image_url(self, attachments: Optional[List[Attachment]]) -> Optional[str]:
+        """Извлекает URL изображения из attachments"""
+        if not attachments:
+            return None
+        
+        for attachment in attachments:
+            # Проверяем тип attachment
+            if hasattr(attachment, 'type'):
+                attachment_type = attachment.type
+                # Может быть строкой "image" или AttachmentType.IMAGE
+                is_image = (
+                    attachment_type == "image" or 
+                    str(attachment_type).lower() == "image" or
+                    (hasattr(AttachmentType, 'IMAGE') and attachment_type == AttachmentType.IMAGE)
+                )
+                
+                if is_image:
+                    # Извлекаем URL из payload
+                    if hasattr(attachment, 'payload'):
+                        payload = attachment.payload
+                        # Проверяем разные варианты payload
+                        if hasattr(payload, 'url'):
+                            return payload.url
+                        elif isinstance(payload, dict):
+                            return payload.get('url') or payload.get('token')
+                        elif hasattr(payload, 'token'):
+                            # Если есть токен, можно использовать его для получения URL
+                            token = getattr(payload, 'token', None)
+                            if token:
+                                # Формируем URL из токена (если нужно)
+                                return token
+                    # Если payload нет или не удалось извлечь, пробуем получить напрямую
+                    if hasattr(attachment, 'url'):
+                        return attachment.url
+        return None
+
+    async def process_user_message(self, bot, user_id: int, message_text: str, attachments: Optional[List[Attachment]] = None) -> bool:
         """Обрабатывает сообщение от пользователя в чате"""
         # Проверяем команду выхода
         if message_text.strip() == "0":
@@ -433,13 +498,17 @@ class SupportHandler:
         chat_info = self.active_chats[user_id]
         chat_info['last_activity'] = time.time()
 
+        # Извлекаем URL изображения, если есть
+        image_url = self._extract_image_url(attachments)
+
         # Добавляем сообщение в лог
         if user_id in self.chat_logs:
             self.chat_logs[user_id].messages.append(
                 ChatMessage(
                     from_user="user",
-                    text=message_text,
-                    time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    text=message_text or "[Изображение]",
+                    time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    image_url=image_url
                 )
             )
             # Обновляем один и тот же файл при каждом сообщении
@@ -448,7 +517,11 @@ class SupportHandler:
         # Если админ еще не подключен, сохраняем в очередь
         if chat_info.get('waiting_for_admin', True):
             messages_queue = chat_info.get('messages_queue', [])
-            messages_queue.append(message_text)
+            queue_item = {
+                'text': message_text,
+                'image_url': image_url
+            }
+            messages_queue.append(queue_item)
             chat_info['messages_queue'] = messages_queue
             return True
 
@@ -456,9 +529,28 @@ class SupportHandler:
         admin_id = chat_info.get('admin_id')
         if admin_id:
             try:
+                # Формируем текст сообщения
+                message_text_to_send = f"👤 Пользователь {user_id}:\n{message_text}" if message_text else f"👤 Пользователь {user_id} отправил изображение"
+                
+                # Формируем attachments для пересылки изображения
+                message_attachments = []
+                if image_url:
+                    try:
+                        image_attachment = Attachment(
+                            type=AttachmentType.IMAGE,
+                            payload=OtherAttachmentPayload(url=image_url)
+                        )
+                        message_attachments.append(image_attachment)
+                    except Exception as e:
+                        log_system_event("support_chat", "create_image_attachment_error",
+                                       error=str(e), user_id=user_id)
+                        # Если не удалось создать attachment, просто добавим URL в текст
+                        message_text_to_send += f"\n\n📷 Изображение: {image_url}"
+                
                 await bot.send_message(
                     chat_id=admin_id,
-                    text=f"👤 Пользователь {user_id}:\n{message_text}"
+                    text=message_text_to_send,
+                    attachments=message_attachments if message_attachments else []
                 )
                 return True
             except Exception as e:
@@ -467,7 +559,7 @@ class SupportHandler:
 
         return False
 
-    async def process_admin_message(self, bot, admin_id: int, message_text: str) -> bool:
+    async def process_admin_message(self, bot, admin_id: int, message_text: str, attachments: Optional[List[Attachment]] = None) -> bool:
         """Обрабатывает сообщение от администратора"""
         try:
             # Проверяем права
@@ -475,7 +567,7 @@ class SupportHandler:
                 return False
 
             # Проверяем команду выхода
-            if message_text.strip() in ["0", "/end"]:
+            if message_text and message_text.strip() in ["0", "/end"]:
                 if self.admin_active_chat:
                     await self._end_chat(bot, self.admin_active_chat, "admin", "admin_exit")
                 else:
@@ -488,7 +580,7 @@ class SupportHandler:
             # Проверяем, есть ли активный чат
             if not self.admin_active_chat:
                 # Если админ отправляет /chat <user_id>
-                if message_text.startswith("/chat "):
+                if message_text and message_text.startswith("/chat "):
                     try:
                         user_id_str = message_text.split()[1]
                         user_id = int(user_id_str)
@@ -523,13 +615,17 @@ class SupportHandler:
             chat_info = self.active_chats[user_id]
             chat_info['last_activity'] = time.time()
 
+            # Извлекаем URL изображения, если есть
+            image_url = self._extract_image_url(attachments)
+
             # Добавляем сообщение в лог
             if user_id in self.chat_logs:
                 self.chat_logs[user_id].messages.append(
                     ChatMessage(
                         from_user="admin",
-                        text=message_text,
-                        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        text=message_text or "[Изображение]",
+                        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        image_url=image_url
                     )
                 )
                 # Обновляем один и тот же файл при каждом сообщении
@@ -537,9 +633,28 @@ class SupportHandler:
 
             # Пересылаем сообщение пользователю
             try:
+                # Формируем текст сообщения
+                message_text_to_send = f"👨‍⚕️ Оператор:\n{message_text}" if message_text else "👨‍⚕️ Оператор отправил изображение"
+                
+                # Формируем attachments для пересылки изображения
+                message_attachments = []
+                if image_url:
+                    try:
+                        image_attachment = Attachment(
+                            type=AttachmentType.IMAGE,
+                            payload=OtherAttachmentPayload(url=image_url)
+                        )
+                        message_attachments.append(image_attachment)
+                    except Exception as e:
+                        log_system_event("support_chat", "create_image_attachment_error",
+                                       error=str(e), user_id=user_id)
+                        # Если не удалось создать attachment, просто добавим URL в текст
+                        message_text_to_send += f"\n\n📷 Изображение: {image_url}"
+                
                 await bot.send_message(
                     chat_id=user_id,
-                    text=f"👨‍⚕️ Оператор:\n{message_text}"
+                    text=message_text_to_send,
+                    attachments=message_attachments if message_attachments else []
                 )
                 return True
             except Exception as e:

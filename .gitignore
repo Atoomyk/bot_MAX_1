@@ -66,6 +66,9 @@ logs/
 .DS_Store
 Thumbs.db
 
+readme.md
+PROJECT_STRUCTURE.md
+
 tickets
 .json
 

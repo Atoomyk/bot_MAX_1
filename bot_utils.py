@@ -292,7 +292,7 @@ async def keepalive_worker():
         while True:
             try:
                 await make_keepalive_request(session)
-                await asyncio.sleep(900)  # 15 минут
+                await asyncio.sleep(1800)  # 30 минут
             except asyncio.CancelledError:
                 log_system_event("keepalive", "worker_stopped")
                 break

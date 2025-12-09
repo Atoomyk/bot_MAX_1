@@ -1,3 +1,22 @@
+tickets
+.json
+
+commands/*.json
+
+PROJECT_STRUCTURE.md
+USER_GUIDE.md
+
+
+# Logs
+*.log
+logs/
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
 <<<<<<< HEAD
 # Python
 __pycache__/
@@ -9,6 +28,11 @@ __pycache__/
 __pycache__/
 *.py[codz]
 *$py.class
+
+manager_webhook, debug_token
+*.py[codz]
+*$py.class
+*.so
 
 # C extensions
 *.so
@@ -33,11 +57,7 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-ENV/
-env/
-.venv
+
 
 # IDE
 .vscode/
@@ -66,14 +86,6 @@ logs/
 .DS_Store
 Thumbs.db
 
-readme.md
-PROJECT_STRUCTURE.md
-
-tickets
-.json
-
-commands
-.json
 
 =======
 share/python-wheels/

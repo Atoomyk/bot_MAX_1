@@ -91,27 +91,37 @@ class SyncService:
             logger.info("4. Сохранение записей в базу данных...")
             user_new_appointments = {}
             total_saved = 0
+            skipped_reminders_off = 0
+            skipped_already_exists = 0
 
             for match in matched_records:
                 user_id = match['user_id']
                 patient_data = match['patient_data']
 
-                # Проверяем, включены ли уведомления у пользователя
-                if not self.matcher.get_user_reminders_status(user_id):
-                    logger.debug(f"Уведомления отключены для пользователя {user_id}, пропускаем")
-                    continue
-
                 # Получаем данные записи
                 appointment_data = patient_data['appointment_data']
                 metadata = patient_data['metadata']
-
-                # Проверяем, не существует ли уже такая запись
                 visit_time = metadata['visit_time']
                 mo_name = metadata['mo_name']
 
-                if self.appointments_db.appointment_exists(user_id, visit_time, mo_name):
-                    logger.debug(f"Запись уже существует для user_id={user_id}")
+                logger.info(f"Обработка записи для user_id={user_id}, время={visit_time}, МО={mo_name}")
+
+                # Проверяем, включены ли уведомления у пользователя
+                reminders_status = self.matcher.get_user_reminders_status(user_id)
+                if not reminders_status:
+                    logger.warning(f"Уведомления отключены для пользователя {user_id}, запись НЕ БУДЕТ сохранена")
+                    skipped_reminders_off += 1
                     continue
+
+                logger.debug(f"Уведомления включены для пользователя {user_id}")
+
+                # Проверяем, не существует ли уже такая запись
+                if self.appointments_db.appointment_exists(user_id, visit_time, mo_name):
+                    logger.warning(f"Запись уже существует для user_id={user_id}, время={visit_time}, МО={mo_name}")
+                    skipped_already_exists += 1
+                    continue
+
+                logger.debug(f"Запись не найдена в БД, сохраняем...")
 
                 # Сохраняем запись в БД
                 success = self.appointments_db.add_appointment(
@@ -122,6 +132,7 @@ class SyncService:
                 )
 
                 if success:
+                    logger.info(f"✓ Запись успешно сохранена для user_id={user_id}")
                     total_saved += 1
 
                     # Добавляем в список для уведомлений

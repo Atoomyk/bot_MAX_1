@@ -6,7 +6,7 @@
 import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 from .utils import (
     normalize_phone,
@@ -100,6 +100,14 @@ class Parser:
             mo_address = record.get('MO_Adress', '').strip()
             specialist_name = record.get('Specialist_Name', '').strip()
             visit_time_str = record.get('VisitTime', '')
+            
+            # Извлекаем дополнительные поля для сохранения в appointment_json
+            book_id_mis = record.get('Book_Id_Mis', '')
+            patient_id = record.get('PatientID', '')
+            
+            # Преобразуем в строковый формат (text)
+            book_id_mis_str = str(book_id_mis) if book_id_mis is not None else ''
+            patient_id_str = str(patient_id) if patient_id is not None else ''
 
             # Проверяем обязательные поля
             if not all([last_name, first_name, birth_date, mobile_phone, visit_time_str]):
@@ -125,6 +133,15 @@ class Parser:
                 logger.warning(f"Некорректное время приема для {normalized_fio}: {visit_time_str}")
                 return None
 
+            # Проверяем, что запись именно на завтра
+            today = date.today()
+            tomorrow = today + timedelta(days=1)
+            visit_date = visit_time.date()
+            
+            if visit_date != tomorrow:
+                logger.debug(f"Запись не на завтра для {normalized_fio}: дата записи {visit_date}, завтра {tomorrow}. Пропускаем.")
+                return None
+
             # Извлекаем информацию о враче
             doctor_fio, doctor_position = extract_doctor_info(specialist_name)
 
@@ -147,6 +164,8 @@ class Parser:
                     'Адрес мед учреждения': mo_address,
                     'ФИО врача': doctor_fio,
                     'Должность врача': doctor_position,
+                    'Book_Id_Mis': book_id_mis_str,
+                    'PatientID': patient_id_str,
                     'Исходные_данные': {  # Для отладки
                         'ФИО пациента': full_fio,
                         'Дата рождения': birth_date,

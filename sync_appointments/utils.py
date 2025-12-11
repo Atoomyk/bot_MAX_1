@@ -155,7 +155,7 @@ def is_within_allowed_hours(check_time: datetime = None) -> bool:
 
     hour = check_time.hour
     # Разрешаем с 8:00 до 21:00
-    return 8 <= hour < 21
+    return 8 <= hour < 22
 
 
 def format_appointment_for_user(appointment_data: dict) -> str:

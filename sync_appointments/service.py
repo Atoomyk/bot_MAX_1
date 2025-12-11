@@ -137,15 +137,28 @@ class SyncService:
                     logger.info(f"✓ Запись успешно сохранена для user_id={user_id}")
                     total_saved += 1
 
+                    # Получаем ID сохраненной записи для кнопки отмены
+                    db_id = self._get_last_inserted_id(user_id, visit_time, mo_name)
+
                     # Добавляем в список для уведомлений
                     if user_id not in user_new_appointments:
                         user_new_appointments[user_id] = []
 
+                    # Получаем ВСЕ данные для уведомления (как в force_sync_with_mock)
                     user_new_appointments[user_id].append({
-                        'db_id': self._get_last_inserted_id(user_id, visit_time, mo_name),
+                        # ID записи в БД для кнопки отмены
+                        'db_id': db_id,
+                        # Данные для отображения
+                        'matching_data': patient_data.get('matching_data', {}),
+                        'appointment_data': appointment_data,
+                        'metadata': metadata,
+                        # Добавляем оригинальные поля для простоты доступа
+                        'patient_fio': patient_data.get('matching_data', {}).get('full_fio', 'не указано'),
                         'visit_time': visit_time,
                         'mo_name': mo_name,
-                        'appointment_data': appointment_data
+                        'mo_address': appointment_data.get('Адрес мед учреждения', 'не указано'),
+                        'doctor_fio': appointment_data.get('ФИО врача', 'не указано'),
+                        'doctor_position': appointment_data.get('Должность врача', 'не указано')
                     })
 
             # 5. Отправка уведомлений пользователям

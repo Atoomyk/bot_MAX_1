@@ -233,7 +233,102 @@ async def message_callback(event: MessageCallback):
             # Используем проверенный sync_service
             sync_service = sync_service_check
             
-            # Отменяем запись
+            # Получаем данные записи, чтобы отправить SOAP-запрос отмены
+            appointment_info = sync_service.appointments_db.get_appointment_by_id_with_status(
+                appointment_id, chat_id_str
+            )
+
+            if not appointment_info:
+                log_user_event(chat_id_str, "appointment_cancel_error",
+                             error="not_found", appointment_id=appointment_id)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Запись не найдена или не принадлежит вам."
+                )
+                return
+
+            if appointment_info.get('status') == 'cancelled':
+                log_user_event(chat_id_str, "appointment_cancel_error",
+                             error="already_cancelled", appointment_id=appointment_id)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="ℹ️ Эта запись уже отменена."
+                )
+                return
+
+            # Простейшая проверка 3 часов по сохраненному времени создания
+            if appointment_info.get('created_at'):
+                from datetime import datetime, timedelta
+                time_diff = datetime.now() - appointment_info['created_at']
+                if time_diff.total_seconds() > 3 * 3600:
+                    log_user_event(chat_id_str, "appointment_cancel_error",
+                                 error="time_limit_exceeded", appointment_id=appointment_id)
+                    await event.bot.send_message(
+                        chat_id=chat_id,
+                        text="❌ Нельзя отменить запись, если прошло более 3 часов с момента создания."
+                    )
+                    return
+
+            appointment_data = appointment_info.get('data') or {}
+            book_id_mis = appointment_data.get('Book_Id_Mis')
+            cancel_reason = getattr(getattr(sync_service, 'cancel_service', None), 'DEFAULT_REASON', "CANCELED_BY_PATIENT")
+
+            cancel_service = getattr(sync_service, 'cancel_service', None)
+            if not cancel_service:
+                log_system_event("appointment", "cancel_failed",
+                               appointment_id=appointment_id,
+                               error="cancel_service_unavailable",
+                               chat_id=chat_id_str)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Сервис отмены временно недоступен. Попробуйте позже."
+                )
+                return
+
+            # Отправляем SOAP-запрос на отмену записи
+            cancel_result = await cancel_service.send_cancel_request(
+                book_id_mis=book_id_mis,
+                canceled_reason=cancel_reason
+            )
+
+            if not cancel_result.get('success'):
+                log_user_event(chat_id_str, "appointment_cancel_failed",
+                             error=cancel_result.get('error', 'soap_error'),
+                             appointment_id=appointment_id)
+                log_system_event("appointment", "cancel_failed",
+                               appointment_id=appointment_id,
+                               error=cancel_result.get('error', cancel_result),
+                               chat_id=chat_id_str)
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Не удалось отменить запись во внешней системе. Попробуйте позже."
+                )
+                return
+
+            # Проверяем статус-код в ответе внешней системы (например, RECORD_NOT_FOUND)
+            response_text = cancel_result.get('response', '') or ''
+            if "<Status_Code>SUCCESS</Status_Code>" not in response_text:
+                log_user_event(
+                    chat_id_str,
+                    "appointment_cancel_failed",
+                    error="external_status_not_success",
+                    appointment_id=appointment_id,
+                    external_response=response_text[:500]
+                )
+                log_system_event(
+                    "appointment",
+                    "cancel_failed_external_status",
+                    appointment_id=appointment_id,
+                    chat_id=chat_id_str,
+                    external_response=response_text[:500]
+                )
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Внешняя система вернула ошибку отмены (запись не найдена или уже отменена)."
+                )
+                return
+
+            # Если SOAP-запрос успешен — фиксируем отмену в БД
             result = sync_service.appointments_db.cancel_appointment(appointment_id, chat_id_str)
             
             if result['success']:

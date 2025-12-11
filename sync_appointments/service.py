@@ -12,6 +12,7 @@ from .parser import Parser
 from .matcher import Matcher
 from .database import AppointmentsDatabase
 from .notifier import Notifier
+from .cancel_service import CancelService
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class SyncService:
         self.matcher = Matcher(user_database)
         self.appointments_db = AppointmentsDatabase(user_database)
         self.notifier = Notifier(bot_instance, self.appointments_db)
+        self.cancel_service = CancelService()
 
         self.last_sync_time = None
         self.last_sync_result = None

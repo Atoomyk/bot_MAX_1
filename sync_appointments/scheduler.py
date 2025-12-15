@@ -45,7 +45,7 @@ class SchedulerManager:
             # 1. Ежедневная синхронизация в 08:00 по Москве
             sync_job = self.scheduler.add_job(
                 func=self._run_sync_wrapper,
-                trigger=CronTrigger(hour=8, minute=0, timezone='Europe/Moscow'),
+                trigger=CronTrigger(hour=8, minute=00, timezone='Europe/Moscow'),
                 id='daily_sync',
                 name='Ежедневная синхронизация записей',
                 replace_existing=True

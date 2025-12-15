@@ -4,8 +4,9 @@ import asyncio
 
 from bot_config import (
     bot, dp, WEBHOOK_MODE, WEBHOOK_PORT,
-    init_sync_service, scheduler_manager, reminder_handler
+    init_sync_service, reminder_handler
 )
+import bot_config
 # Импортируем обработчики для регистрации
 import bot_handlers
 from bot_utils import (
@@ -28,8 +29,8 @@ async def main():
     init_sync_service()
 
     # Запуск планировщика задач синхронизации
-    if scheduler_manager:
-        scheduler_started = scheduler_manager.start_scheduler()
+    if bot_config.scheduler_manager:
+        scheduler_started = bot_config.scheduler_manager.start_scheduler()
         if scheduler_started:
             log_system_event("sync", "scheduler_started")
         else:
@@ -78,8 +79,8 @@ async def main():
         await stop_all_tasks(keepalive_task, chat_cleanup_task, notification_task)
 
         # Останавливаем планировщик синхронизации
-        if scheduler_manager:
-            await scheduler_manager.wait_for_scheduler()
+        if bot_config.scheduler_manager:
+            await bot_config.scheduler_manager.wait_for_scheduler()
 
 
 if __name__ == "__main__":

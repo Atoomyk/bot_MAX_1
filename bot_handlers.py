@@ -13,6 +13,8 @@ from bot_utils import (
     send_main_menu, send_other_options_menu
 )
 from logging_config import log_user_event, log_system_event, log_security_event
+from visit_a_doctor.handlers import start_booking, handle_callback as handle_doctor_callback, handle_text_input as handle_doctor_text, get_or_create_context
+from visit_a_doctor.states import UserContext as DoctorUserContext
 
 
 # --- ОБРАБОТЧИКИ СОБЫТИЙ ---
@@ -67,6 +69,18 @@ async def message_callback(event: MessageCallback):
         chat_id = event.message.recipient.chat_id
         chat_id_str = str(chat_id)
         payload = event.callback.payload
+
+        # --- Visit Doctor Module ---
+        if payload == 'start_visit_doctor':
+            log_user_event(chat_id_str, "visit_doctor_start")
+            await start_booking(event.bot, chat_id)
+            return
+            
+        if payload.startswith('doc_'):
+            log_user_event(chat_id_str, "visit_doctor_action", payload=payload)
+            await handle_doctor_callback(event.bot, chat_id, payload)
+            return
+        # ---------------------------
 
         # Логирование button_pressed будет происходить только для неизвестных payload
         # Специфичные события логируются в соответствующих обработчиках
@@ -512,6 +526,24 @@ async def handle_message(event: MessageCreated):
 
         if not event.message.body:
             return
+
+        # --- Visit Doctor Module ---
+        # Проверяем, находится ли пользователь в сценарии записи к врачу
+        if event.message.body.text:
+            try:
+                ctx = await get_or_create_context(chat_id_str)
+                if ctx.step != "INIT":
+                    text_val = event.message.body.text
+                    if text_val.lower() in ['/start', 'отмена', 'стоп', 'выйти']:
+                        ctx.step = "INIT"
+                        # Проваливаемся дальше, чтобы показать главное меню
+                    else:
+                        log_user_event(chat_id_str, "visit_doctor_text_input")
+                        await handle_doctor_text(event.bot, chat_id, text_val)
+                        return
+            except Exception as e:
+                log_system_event("visit_doctor_module", "context_error", error=str(e))
+        # ---------------------------
 
         # Получаем attachments из сообщения
         attachments = event.message.body.attachments if hasattr(event.message.body, 'attachments') else None

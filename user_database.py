@@ -171,6 +171,30 @@ class UserDatabase:
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
+    # Получение полных данных пользователя для записи к врачу
+    # ---------------------------------------------------------------------
+    def get_user_full_data(self, chat_id: str):
+        """
+        Возвращает dict {fio, birth_date, phone} или None
+        """
+        try:
+            self.cursor.execute(
+                "SELECT fio, birth_date, phone FROM users WHERE chat_id = %s",
+                (chat_id,)
+            )
+            row = self.cursor.fetchone()
+            if row:
+                return {
+                    'fio': row[0],
+                    'birth_date': row[1],
+                    'phone': row[2]
+                }
+            return None
+        except psycopg2.Error as e:
+            log_system_event("database", "get_user_full_data_error", error=str(e), chat_id=chat_id)
+            return None
+
+    # ---------------------------------------------------------------------
     # Получение статуса включено/выключено
     # ---------------------------------------------------------------------
     def get_reminders_status(self, chat_id: str) -> bool:

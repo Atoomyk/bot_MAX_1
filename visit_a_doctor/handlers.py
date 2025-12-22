@@ -141,25 +141,25 @@ async def handle_callback(bot, chat_id, payload):
             return
         ctx.step = "ENTER_BIRTHDATE"
         ctx.return_to_confirm = True
-        await bot.send_message(chat_id, "Введите дату рождения (ДД.ММ.ГГГГ):")
+        await bot.send_message(chat_id=chat_id, text="Введите дату рождения (ДД.ММ.ГГГГ):")
         return
         
     if payload == "doc_edit_gender": 
         ctx.step = "ENTER_GENDER"
         ctx.return_to_confirm = True
-        await bot.send_message(chat_id, "Введите пол (м/ж):")
+        await bot.send_message(chat_id=chat_id, text="Введите пол (м/ж):")
         return
         
     if payload == "doc_edit_snils": 
         ctx.step = "ENTER_SNILS"
         ctx.return_to_confirm = True
-        await bot.send_message(chat_id, "Введите СНИЛС (XXX-XXX-XXX XX):")
+        await bot.send_message(chat_id=chat_id, text="Введите СНИЛС (XXX-XXX-XXX XX):")
         return
         
     if payload == "doc_edit_oms": 
         ctx.step = "ENTER_OMS"
         ctx.return_to_confirm = True
-        await bot.send_message(chat_id, "Введите полис ОМС:")
+        await bot.send_message(chat_id=chat_id, text="Введите полис ОМС:")
         return
 
 
@@ -466,6 +466,10 @@ async def handle_text_input(bot, chat_id, text):
             return True
 
         ctx.patient_fio = text
+        if getattr(ctx, 'return_to_confirm', False):
+            await show_patient_confirmation(bot, chat_id, ctx)
+            return True
+
         ctx.step = "ENTER_BIRTHDATE"
         await bot.send_message(chat_id=chat_id, text="Введите дату рождения пациента (ДД.ММ.ГГГГ):")
         return True
@@ -483,6 +487,10 @@ async def handle_text_input(bot, chat_id, text):
             return True
 
         ctx.patient_birthdate = text
+        if getattr(ctx, 'return_to_confirm', False):
+            await show_patient_confirmation(bot, chat_id, ctx)
+            return True
+
         ctx.step = "ENTER_GENDER"
         await bot.send_message(chat_id=chat_id, text="Введите пол пациента (м/ж):")
         return True
@@ -514,6 +522,10 @@ async def handle_text_input(bot, chat_id, text):
             return True
 
         ctx.patient_snils = snils
+        if getattr(ctx, 'return_to_confirm', False):
+            await show_patient_confirmation(bot, chat_id, ctx)
+            return True
+
         ctx.step = "ENTER_OMS"
         await bot.send_message(chat_id=chat_id,
                                text=("Введите номер полиса ОМС.\n"

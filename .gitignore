@@ -3,9 +3,9 @@ tickets
 
 commands/*.json
 
-PROJECT_STRUCTURE.md
-USER_GUIDE.md
 
+USER_GUIDE.md
+PROJECT_STRUCTURE.md
 
 # Logs
 *.log

@@ -6,6 +6,7 @@
 from visit_a_doctor.states import UserContext
 from visit_a_doctor import keyboards as kb
 from visit_a_doctor.soap_client import SoapClient
+import uuid
 from visit_a_doctor.soap_parser import SoapResponseParser
 from visit_a_doctor.specialties_mapping import get_specialty_name
 from bot_utils import send_main_menu
@@ -179,7 +180,8 @@ async def handle_callback(bot, chat_id, payload):
             oms=ctx.patient_oms,
             birthdate='-'.join(ctx.patient_birthdate.split('.')[::-1]) if '.' in ctx.patient_birthdate else "2000-01-01",
             fio_parts=parts,
-            gender=ctx.patient_gender
+            gender=ctx.patient_gender,
+            client_session_id=getattr(ctx, 'client_session_id', str(uuid.uuid4()))
         )
         session_id = SoapResponseParser.parse_session_id(xml)
         if not session_id:
@@ -194,6 +196,10 @@ async def handle_callback(bot, chat_id, payload):
     if payload.startswith('doc_person_'):
         selection = payload.replace('doc_person_', '')
         ctx.selected_person = selection
+        
+        # Генерируем новый Session_ID для этой сессии записи
+        ctx.client_session_id = str(uuid.uuid4())
+        print(f"DEBUG: Generated new Session_ID: {ctx.client_session_id}")
         
         if selection == 'other':
             ctx.step = "ENTER_FIO"

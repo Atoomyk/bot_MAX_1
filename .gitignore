@@ -2,7 +2,7 @@ tickets
 .json
 
 commands/*.json
-
+ggg.py
 
 USER_GUIDE.md
 PROJECT_STRUCTURE.md

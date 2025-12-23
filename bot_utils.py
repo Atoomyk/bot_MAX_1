@@ -221,9 +221,9 @@ def create_main_menu_keyboard():
     urls = _get_url_constants()
     buttons_config = [
         [{'type': 'callback', 'text': 'Записаться на приём к врачу', 'payload': "start_visit_doctor"}],
-        [{'type': 'link', 'text': 'Вызов врача на дом', 'url': urls['GOSUSLUGI_DOCTOR_HOME_URL']}],
-        [{'type': 'link', 'text': 'Профосмотр/диспансеризация', 'url': urls['GOSUSLUGI_MEDICAL_EXAM_URL']}],
-        [{'type': 'link', 'text': 'Прикрепление к поликлинике', 'url': urls['GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL']}],
+        #[{'type': 'link', 'text': 'Вызов врача на дом', 'url': urls['GOSUSLUGI_DOCTOR_HOME_URL']}],
+        #[{'type': 'link', 'text': 'Профосмотр/диспансеризация', 'url': urls['GOSUSLUGI_MEDICAL_EXAM_URL']}],
+        #[{'type': 'link', 'text': 'Прикрепление к поликлинике', 'url': urls['GOSUSLUGI_ATTACH_TO_POLYCLINIC_URL']}],
         [{'type': 'callback', 'text': '🔍 Другие возможности', 'payload': "other_options"}]
     ]
     return create_keyboard(buttons_config)
@@ -233,8 +233,8 @@ def create_other_options_keyboard():
     """Создает клавиатуру меню 'Другие возможности'"""
     urls = _get_url_constants()
     buttons_config = [
-        [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': urls['MAP_OF_MEDICAL_INSTITUTIONS_URL']}],
-        [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': urls['CONTACT_CENTER_URL']}],
+        #[{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': urls['MAP_OF_MEDICAL_INSTITUTIONS_URL']}],
+        #[{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': urls['CONTACT_CENTER_URL']}],
         [{'type': 'callback', 'text': '🔔 Настройки напоминаний', 'payload': "reminders_settings"}],
         [{'type': 'callback', 'text': '💬 Онлайн чат с поддержкой', 'payload': "support_request"}],
         [{'type': 'callback', 'text': '⬅️ Назад', 'payload': "back_to_main"}]
@@ -256,8 +256,8 @@ async def send_other_options_menu(bot_instance: Bot, chat_id: int):
     """Отправляет меню 'Другие возможности'"""
     urls = _get_url_constants()
     keyboard = create_keyboard([
-        [{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': urls['MAP_OF_MEDICAL_INSTITUTIONS_URL']}],
-        [{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': urls['CONTACT_CENTER_URL']}],
+        #[{'type': 'link', 'text': '🏥 Ближайшие гос мед учреждения', 'url': urls['MAP_OF_MEDICAL_INSTITUTIONS_URL']}],
+        #[{'type': 'link', 'text': '📞 Единый контакт-центр здравоохранения Севастополя', 'url': urls['CONTACT_CENTER_URL']}],
         [{'type': 'callback', 'text': '🔔 Настройки напоминаний', 'payload': "reminders_settings"}],
         [{'type': 'callback', 'text': '💬 Онлайн чат с поддержкой', 'payload': "support_request"}],
         [{'type': 'callback', 'text': '⬅️ Назад', 'payload': "back_to_main"}]

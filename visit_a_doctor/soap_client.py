@@ -31,7 +31,7 @@ class SoapClient:
                 return ""
 
     @staticmethod
-    async def get_patient_session(snils, oms, birthdate, fio_parts, gender) -> str:
+    async def get_patient_session(snils, oms, birthdate, fio_parts, gender, client_session_id) -> str:
         """
         1. GetPatientInfoRequest
         Возвращает XML для парсинга
@@ -41,7 +41,7 @@ class SoapClient:
         xml = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
     <soapenv:Body>
         <GetPatientInfoRequest xmlns="http://www.rt-eu.ru/med/er/v2_0">
-            <Session_ID>392272aa-0acb-4733-8b08-1aa89f08805b</Session_ID>
+            <Session_ID>{client_session_id}</Session_ID>
             <Patient_Data>
                 <OMS_Number>{oms}</OMS_Number>
                 <SNILS>{snils}</SNILS>

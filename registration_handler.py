@@ -3,13 +3,14 @@ import re
 import asyncio
 from typing import Dict, Any, Callable, Optional
 from maxapi import Bot
+from maxapi.types import InputMedia
 
 from user_database import db
 from logging_config import log_user_event, log_data_event, log_system_event
 from bot_utils import create_keyboard
 
 # Callback-константы для регистрации
-SOGL_LINK = "https://sevmiac.ru/upload/iblock/d73/sttjnvlhg3j2df943ve0fv3husrlm8oj.pdf"
+# SOGL_LINK = "https://sevmiac.ru/upload/iblock/d73/sttjnvlhg3j2df943ve0fv3husrlm8oj.pdf"
 CONTINUE_CALLBACK = "start_continue"
 AGREEMENT_CALLBACK = "agreement_accepted"
 ADMIN_CONTACT = "@admin_MIAC"
@@ -34,10 +35,20 @@ class RegistrationHandler:
             {'type': 'callback', 'text': 'Согласие на обработку персональных данных', 'payload': AGREEMENT_CALLBACK}
         ]])
 
+        import os
+        consent_file_path = os.path.join(os.getcwd(), "Soglasie.txt")
+        
+        attachments = []
+        if os.path.exists(consent_file_path):
+             attachments.append(InputMedia(path=consent_file_path))
+        
+        if keyboard:
+            attachments.append(keyboard)
+
         await bot_instance.send_message(
             chat_id=chat_id,
-            text=f'Продолжая, Вы даёте согласие на обработку персональных данных.\nОзнакомиться с документом вы можете по ссылке {SOGL_LINK}',
-            attachments=[keyboard] if keyboard else []
+            text='Продолжая, Вы даёте согласие на обработку персональных данных.\nПолный текст документа прикреплен к этому сообщению 👇',
+            attachments=attachments
         )
 
     async def start_registration_process(self, bot_instance: Bot, chat_id: int):

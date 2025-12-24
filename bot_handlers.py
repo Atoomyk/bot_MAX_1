@@ -1,7 +1,7 @@
 # bot_handlers.py
 """Обработчики событий бота"""
 import time
-from maxapi.types import BotStarted, MessageCallback, MessageCreated
+from maxapi.types import BotStarted, MessageCallback, MessageCreated, InputMedia
 
 from bot_config import (
     bot, dp, db, user_states, processed_events,
@@ -49,11 +49,20 @@ async def bot_started(event: BotStarted):
                 {'type': 'callback', 'text': 'Продолжить', 'payload': "start_continue"}
             ]])
 
+            attachments = []
+            import os
+            image_path = os.path.join(os.getcwd(), 'start_foto.png')
+            if os.path.exists(image_path):
+                attachments.append(InputMedia(path=image_path))
+            
+            if keyboard:
+                attachments.append(keyboard)
+
             await event.bot.send_message(
                 chat_id=chat_id,
-                text='Здравствуйте! 👩‍⚕️\n\nВас приветствует чат-бот "Цифровое здравоохранение Севастополя"!\nТут можно быстро и легко:\n\n📌 Записаться к врачу\n📌 Получать уведомления о записях к врачам\n📌 Отменять приёмы при необходимости\n📌 Обратиться в онлайн-чат поддержки по любому вопросу',
+                text='Здравствуйте! 👩‍⚕️\n\nВас приветствует чат-бот "Цифровое здравоохранение Севастополя"!\nТут можно быстро и легко:\n📌 Записаться к врачу\n📌 Получать уведомления о записях к врачам\n📌 Отменять приёмы при необходимости\n📌 Обратиться в онлайн-чат поддержки по любому вопросу',
                 #text='Здравствуйте! 👩‍⚕️\n\nВы обратились в Медицинский информационно-аналитический центр города Севастополя.\nНаша система позволяет Вам удобно и быстро решить следующие задачи:\n\n📌 Записаться на приём к врачу;\n📌 Вызвать врача на дом;\n📌 Записаться на профилактический медосмотр/диспансеризацию;\n📌 Прикрепиться к поликлинике;\n📌 Получать уведомления о записи к врачу с возможностью её отмены;\n📌 Найти ближайшие государственные медицинские учреждения.',
-                attachments=[keyboard] if keyboard else []
+                attachments=attachments
             )
     except Exception as e:
         log_system_event("bot_started", "message_send_failed", error=str(e), chat_id=chat_id_str)

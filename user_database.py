@@ -54,6 +54,9 @@ class UserDatabase:
                 fio TEXT NOT NULL,
                 phone VARCHAR(20) UNIQUE NOT NULL,
                 birth_date VARCHAR(10) NOT NULL,
+                snils VARCHAR(14),
+                oms VARCHAR(16),
+                gender VARCHAR(10),
                 registration_date TEXT NOT NULL
             );
             """
@@ -61,6 +64,9 @@ class UserDatabase:
 
             self._add_column_if_not_exists('birth_date', 'VARCHAR(10)')
             self._add_column_if_not_exists('registration_date', 'TEXT')
+            self._add_column_if_not_exists('snils', 'VARCHAR(14)')
+            self._add_column_if_not_exists('oms', 'VARCHAR(16)')
+            self._add_column_if_not_exists('gender', 'VARCHAR(10)')
 
             self.conn.commit()
             log_system_event("database", "users_table_initialized")
@@ -175,11 +181,11 @@ class UserDatabase:
     # ---------------------------------------------------------------------
     def get_user_full_data(self, chat_id: str):
         """
-        Возвращает dict {fio, birth_date, phone} или None
+        Возвращает dict {fio, birth_date, phone, snils, oms, gender} или None
         """
         try:
             self.cursor.execute(
-                "SELECT fio, birth_date, phone FROM users WHERE chat_id = %s",
+                "SELECT fio, birth_date, phone, snils, oms, gender FROM users WHERE chat_id = %s",
                 (chat_id,)
             )
             row = self.cursor.fetchone()
@@ -187,7 +193,10 @@ class UserDatabase:
                 return {
                     'fio': row[0],
                     'birth_date': row[1],
-                    'phone': row[2]
+                    'phone': row[2],
+                    'snils': row[3],
+                    'oms': row[4],
+                    'gender': row[5]
                 }
             return None
         except psycopg2.Error as e:
@@ -310,6 +319,19 @@ class UserDatabase:
 
         return 18 <= age <= 150
 
+    def validate_snils(self, snils: str) -> bool:
+        """Простая проверка формата СНИЛС (11 цифр)"""
+        snils_cleaned = re.sub(r'[\s\-]', '', snils)
+        return bool(re.match(r"^\d{11}$", snils_cleaned))
+
+    def validate_oms(self, oms: str) -> bool:
+        """Простая проверка формата ОМС (16 цифр)"""
+        oms_cleaned = re.sub(r'[\s\-]', '', oms)
+        return bool(re.match(r"^\d{16}$", oms_cleaned))
+
+    def validate_gender(self, gender: str) -> bool:
+        return gender in ["Мужской", "Женский"]
+
     def get_user_phone(self, chat_id: str) -> str:
         try:
             self.cursor.execute("SELECT phone FROM users WHERE chat_id = %s", (chat_id,))
@@ -318,27 +340,36 @@ class UserDatabase:
         except psycopg2.Error:
             return "Не указан"
 
-    def validate_user_data(self, fio, phone, birth_date):
-        return (
+    def validate_user_data(self, fio, phone, birth_date, snils=None, oms=None, gender=None):
+        base_valid = (
             self.validate_fio(fio)
             and self.validate_phone(phone)
             and self.validate_birth_date(birth_date)
         )
+        if snils and not self.validate_snils(snils):
+            return False
+        if oms and not self.validate_oms(oms):
+            return False
+        if gender and not self.validate_gender(gender):
+            return False
+        return base_valid
 
-    def register_user(self, chat_id: str, fio: str, phone: str, birth_date: str) -> bool:
-        if not self.validate_user_data(fio, phone, birth_date):
+    def register_user(self, chat_id: str, fio: str, phone: str, birth_date: str, snils: str = None, oms: str = None, gender: str = None) -> bool:
+        if not self.validate_user_data(fio, phone, birth_date, snils, oms, gender):
             return False
 
         try:
             reg_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             phone_cleaned = re.sub(r'[\s\-]', '', phone)
+            snils_cleaned = re.sub(r'[\s\-]', '', snils) if snils else None
+            oms_cleaned = re.sub(r'[\s\-]', '', oms) if oms else None
 
             self.cursor.execute(
                 """
-                INSERT INTO users (chat_id, fio, phone, birth_date, registration_date)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO users (chat_id, fio, phone, birth_date, snils, oms, gender, registration_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (chat_id, fio, phone_cleaned, birth_date, reg_date)
+                (chat_id, fio, phone_cleaned, birth_date, snils_cleaned, oms_cleaned, gender, reg_date)
             )
             self.conn.commit()
 

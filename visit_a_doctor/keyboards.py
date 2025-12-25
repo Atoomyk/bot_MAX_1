@@ -167,7 +167,13 @@ def kb_time_selection(slots, page=0, page_size=10):
     buttons.append([get_back_button('doc_back_to_date')])
     return create_keyboard(buttons)
 
-# Gender selection now handled via text input
+def kb_gender_selection():
+    """Выбор пола"""
+    buttons = [
+        [{'type': 'callback', 'text': 'Мужской', 'payload': 'doc_gender_male'}],
+        [{'type': 'callback', 'text': 'Женский', 'payload': 'doc_gender_female'}]
+    ]
+    return create_keyboard(buttons)
 
 def kb_confirm_patient_data(is_self_booking=False):
     """Подтверждение данных пациента

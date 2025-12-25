@@ -1,6 +1,6 @@
-# registration_handler.py
 import re
 import asyncio
+from datetime import datetime
 from typing import Dict, Any, Callable, Optional
 from maxapi import Bot
 from maxapi.types import InputMedia
@@ -8,6 +8,7 @@ from maxapi.types import InputMedia
 from user_database import db
 from logging_config import log_user_event, log_data_event, log_system_event
 from bot_utils import create_keyboard
+from patient_api_client import get_patients_by_phone
 
 # Callback-константы для регистрации
 # SOGL_LINK = "https://sevmiac.ru/upload/iblock/d73/sttjnvlhg3j2df943ve0fv3husrlm8oj.pdf"
@@ -17,10 +18,16 @@ ADMIN_CONTACT = "@admin_MIAC"
 
 CORRECT_FIO_CALLBACK = "correct_fio"
 CORRECT_BIRTH_DATE_CALLBACK = "correct_birth_date"
+CORRECT_SNILS_CALLBACK = "correct_snils"
+CORRECT_OMS_CALLBACK = "correct_oms"
+CORRECT_GENDER_CALLBACK = "correct_gender"
 CORRECT_PHONE_CALLBACK = "correct_phone"
 CONFIRM_DATA_CALLBACK = "confirm_data"
 CONFIRM_PHONE_CALLBACK = "confirm_phone"
 REJECT_PHONE_CALLBACK = "reject_phone"
+
+GENDER_MALE_CALLBACK = "gender_male"
+GENDER_FEMALE_CALLBACK = "gender_female"
 
 
 class RegistrationHandler:
@@ -115,23 +122,70 @@ class RegistrationHandler:
             text="Отлично!\nТеперь введите вашу дату рождения\n\nФормат: ДД.ММ.ГГГГ\nПример: 13.03.2003"
         )
 
+    async def request_snils(self, bot_instance: Bot, chat_id: int, user_data: dict):
+        """Запрашивает СНИЛС"""
+        self.user_states[str(chat_id)] = {'state': 'waiting_snils', 'data': user_data}
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="Теперь введите ваш СНИЛС (11 цифр).\nМожно с дефисами и пробелами."
+        )
+
+    async def request_oms(self, bot_instance: Bot, chat_id: int, user_data: dict):
+        """Запрашивает полис ОМС"""
+        self.user_states[str(chat_id)] = {'state': 'waiting_oms', 'data': user_data}
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="Введите номер полиса ОМС (16 цифр)."
+        )
+
+    async def request_gender(self, bot_instance: Bot, chat_id: int, user_data: dict):
+        """Запрашивает пол пользователя"""
+        current_state = self.user_states.get(str(chat_id), {})
+        new_state = {'state': 'waiting_gender', 'data': user_data}
+        if 'candidates' in current_state:
+            new_state['candidates'] = current_state['candidates']
+            
+        self.user_states[str(chat_id)] = new_state
+        
+        keyboard = create_keyboard([[
+            {'type': 'callback', 'text': 'Мужской', 'payload': GENDER_MALE_CALLBACK},
+            {'type': 'callback', 'text': 'Женский', 'payload': GENDER_FEMALE_CALLBACK}
+        ]])
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="Выберите ваш пол:",
+            attachments=[keyboard]
+        )
+
     async def send_confirmation_message(self, bot_instance: Bot, chat_id: int, user_data: dict):
         """Отправляет сообщение с подтверждением данных"""
         fio = user_data.get('fio', 'Не указано')
         birth_date = user_data.get('birth_date', 'Не указано')
         phone = user_data.get('phone', 'Не указано')
+        snils = user_data.get('snils', 'Не указано')
+        oms = user_data.get('oms', 'Не указано')
+        gender = user_data.get('gender', 'Не указано')
 
         log_data_event(str(chat_id), "confirmation_prepared", fio=fio, birth_date=birth_date, phone=phone)
 
-        keyboard = create_keyboard([
+        buttons_config = [
             [{'type': 'callback', 'text': '⚠️ Исправить ФИО', 'payload': CORRECT_FIO_CALLBACK}],
             [{'type': 'callback', 'text': '⚠️ Исправить дату рождения', 'payload': CORRECT_BIRTH_DATE_CALLBACK}],
+            [{'type': 'callback', 'text': '⚠️ Исправить СНИЛС', 'payload': CORRECT_SNILS_CALLBACK}],
+            [{'type': 'callback', 'text': '⚠️ Исправить ОМС', 'payload': CORRECT_OMS_CALLBACK}],
+            [{'type': 'callback', 'text': '⚠️ Исправить пол', 'payload': CORRECT_GENDER_CALLBACK}],
             [{'type': 'callback', 'text': '✅ Всё верно, подтвердить', 'payload': CONFIRM_DATA_CALLBACK}]
-        ])
+        ]
+
+        # Если есть список кандидатов, добавляем кнопку "Назад"
+        if self.user_states.get(str(chat_id), {}).get('candidates'):
+             buttons_config.append([{'type': 'callback', 'text': '🔙 Назад к выбору', 'payload': 'reg_back_to_list'}])
+
+        keyboard = create_keyboard(buttons_config)
 
         await bot_instance.send_message(
             chat_id=chat_id,
-            text=f"📋 Пожалуйста, проверьте введенные данные:\n\n👤 ФИО: {fio}\n🎂 Дата рождения: {birth_date}\n📞 Телефон: {phone}\n\nЕсли всё верно - нажмите 'Подтвердить', или выберите что нужно исправить:",
+            text=f"📋 Пожалуйста, проверьте введенные данные:\n\n👤 ФИО: {fio}\n🎂 Дата рождения: {birth_date}\n📞 Телефон: {phone}\n💳 СНИЛС: {snils}\n🏥 ОМС: {oms}\n⚧ Пол: {gender}\n\nЕсли всё верно - нажмите 'Подтвердить', или выберите что нужно исправить:",
             attachments=[keyboard] if keyboard else []
         )
 
@@ -140,10 +194,13 @@ class RegistrationHandler:
         fio = user_data['fio']
         birth_date = user_data['birth_date']
         phone = user_data['phone']
+        snils = user_data.get('snils')
+        oms = user_data.get('oms')
+        gender = user_data.get('gender')
 
         try:
             async with asyncio.timeout(10):
-                success = db.register_user(str(chat_id), fio, phone, birth_date)
+                success = db.register_user(str(chat_id), fio, phone, birth_date, snils, oms, gender)
         except asyncio.TimeoutError:
             log_system_event("db_timeout", chat_id=str(chat_id))
             await bot_instance.send_message(
@@ -177,13 +234,19 @@ class RegistrationHandler:
         validator_map = {
             'fio': db.validate_fio,
             'birth_date': db.validate_birth_date,
-            'phone': db.validate_phone
+            'phone': db.validate_phone,
+            'snils': db.validate_snils,
+            'oms': db.validate_oms,
+            'gender': db.validate_gender
         }
 
         error_messages = {
             'fio': "❌ Ошибка формата!\n\nПожалуйста, введите ваше ФИО в формате: Фамилия Имя Отчество\n\nПример: Иванов Иван Иванович",
             'birth_date': "❌ Ошибка формата!\n\nПожалуйста, введите дату рождения в формате: ДД.ММ.ГГГГ\n\nПример: 13.03.2003",
-            'phone': "❌ Неверный формат номера телефона."
+            'phone': "❌ Неверный формат номера телефона.",
+            'snils': "❌ Неверный формат СНИЛС (нужно 11 цифр).",
+            'oms': "❌ Неверный формат ОМС (нужно 16 цифр).",
+            'gender': "❌ Неверный формат пола."
         }
 
         if input_type not in validator_map:
@@ -211,6 +274,21 @@ class RegistrationHandler:
                 'state': 'waiting_birth_date_correction',
                 'log_event': 'birth_date_correction_requested',
                 'message': "Введите вашу дату рождения для исправления:\n\nФормат: ДД.ММ.ГГГГ\nПример: 13.03.2003"
+            },
+            'snils': {
+                'state': 'waiting_snils_correction',
+                'log_event': 'snils_correction_requested',
+                'message': "Введите ваш СНИЛС для исправления (11 цифр)."
+            },
+            'oms': {
+                'state': 'waiting_oms_correction',
+                'log_event': 'oms_correction_requested',
+                'message': "Введите ваш полис ОМС для исправления (16 цифр)."
+            },
+            'gender': {
+                'state': 'waiting_gender_correction',
+                'log_event': 'gender_correction_requested',
+                'message': "Выберите ваш пол для исправления:"
             }
         }
 
@@ -221,7 +299,26 @@ class RegistrationHandler:
         self.user_states[str(chat_id)] = {'state': config['state'], 'data': user_data}
         log_user_event(str(chat_id), config['log_event'])
 
-        await bot_instance.send_message(chat_id=chat_id, text=config['message'])
+        attachments = []
+        if data_type == 'gender':
+            keyboard = create_keyboard([[
+                {'type': 'callback', 'text': 'Мужской', 'payload': GENDER_MALE_CALLBACK},
+                {'type': 'callback', 'text': 'Женский', 'payload': GENDER_FEMALE_CALLBACK}
+            ]])
+            if keyboard:
+                attachments.append(keyboard)
+
+        await bot_instance.send_message(chat_id=chat_id, text=config['message'], attachments=attachments)
+
+    def _is_adult(self, birth_date_str: str) -> bool:
+        """Проверяет, есть ли пользователю 18 лет. Формат: ДД.ММ.ГГГГ"""
+        try:
+            birth_date = datetime.strptime(birth_date_str, "%d.%m.%Y")
+            today = datetime.now()
+            age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+            return age >= 18
+        except ValueError:
+            return False
 
     async def handle_phone_confirmation(self, bot_instance: Bot, chat_id_str: str, chat_id: int):
         """Обработка подтверждения телефона"""
@@ -236,7 +333,52 @@ class RegistrationHandler:
             await self.start_registration_process(bot_instance, chat_id)
             return
 
-        await self.start_fio_request(bot_instance, chat_id, user_data)
+        # ⚡ ЗАПРОС К API ПАЦИЕНТОВ ⚡
+        await bot_instance.send_message(chat_id=chat_id, text="🔄 Проверяем данные в Рег. системе...")
+        found_patients = await get_patients_by_phone(user_data['phone'])
+        
+        # Фильтрация несовершеннолетних
+        adult_patients = [p for p in found_patients if self._is_adult(p.get('birth_date', ''))]
+        
+        if not adult_patients:
+            # Если ничего не нашли (или все несовершеннолетние) — обычная регистрация
+            await self.start_fio_request(bot_instance, chat_id, user_data)
+            return
+
+        # Если нашли ровно одного взрослого — выбираем автоматически
+        if len(adult_patients) == 1:
+            p = adult_patients[0]
+            user_data['fio'] = p['fio']
+            user_data['birth_date'] = p['birth_date']
+            user_data['snils'] = p['snils']
+            user_data['oms'] = p['oms']
+
+            # Устанавливаем стейт (без candidates, т.к. выбор был безальтернативный)
+            self.user_states[chat_id_str] = {'state': 'waiting_gender', 'data': user_data}
+            
+            log_data_event(chat_id_str, "identity_autoselected_single", snils=user_data['snils'])
+            # Сразу переходим к запросу пола
+            await self.request_gender(bot_instance, chat_id, user_data)
+            return
+
+        # Если нашли взрослых (>1) — предлагаем выбрать
+        self.user_states[chat_id_str] = {'state': 'waiting_identity_selection', 'data': user_data, 'candidates': adult_patients}
+        
+        keyboard_rows = []
+        for idx, p in enumerate(adult_patients):
+            btn_text = f"{p['fio']} ({p['birth_date']})"
+            keyboard_rows.append([{'type': 'callback', 'text': btn_text, 'payload': f"reg_identity_{idx}"}])
+        
+        # Ручной ввод убран по требованию
+        
+        keyboard = create_keyboard(keyboard_rows)
+        
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            #text="🔍 По вашему номеру найдены следующие пациенты.\nКто вы?",
+            text="🔍 На ваш номер зарегистрировано несколько медицинских карт.\nЧтобы пройти регистрацию выберете себя!",
+            attachments=[keyboard]
+        )
 
     async def handle_data_correction(self, bot_instance: Bot, chat_id_str: str, chat_id: int, data_type: str):
         """Обработка исправления данных"""
@@ -244,15 +386,76 @@ class RegistrationHandler:
         current_data.pop(data_type, None)
         await self.request_data_correction(bot_instance, chat_id, current_data, data_type)
 
+    async def handle_identity_selection(self, bot_instance: Bot, chat_id_str: str, chat_id: int, selection_idx: str):
+        """Обработка выбора личности из списка API"""
+        current_state = self.user_states.get(chat_id_str, {})
+        user_data = current_state.get('data', {})
+        candidates = current_state.get('candidates', [])
+
+        if selection_idx == 'manual':
+            await self.start_fio_request(bot_instance, chat_id, user_data)
+            return
+
+        try:
+            idx = int(selection_idx)
+            selected_patient = candidates[idx]
+        except (ValueError, IndexError):
+            await bot_instance.send_message(chat_id=chat_id, text="⚠ Ошибка выбора. Пробуем вручную.")
+            await self.start_fio_request(bot_instance, chat_id, user_data)
+            return
+
+        # Автозаполнение данных
+        user_data['fio'] = selected_patient['fio']
+        user_data['birth_date'] = selected_patient['birth_date']
+        user_data['snils'] = selected_patient['snils']
+        user_data['oms'] = selected_patient['oms']
+
+        self.user_states[chat_id_str] = {
+            'state': 'waiting_gender',
+            'data': user_data,
+            'candidates': candidates # Сохраняем кандидатов для кнопки "Назад"
+        }
+        log_data_event(chat_id_str, "identity_autofilled", snils=user_data['snils'])
+
+        await self.request_gender(bot_instance, chat_id, user_data)
+ 
+    async def handle_back_to_list(self, bot_instance: Bot, chat_id_str: str, chat_id: int):
+        """Возврат к экрану выбора личности"""
+        current_state = self.user_states.get(chat_id_str, {})
+        candidates = current_state.get('candidates', [])
+        user_data = current_state.get('data', {})
+
+        if not candidates:
+            # Если кандидатов нет в стейте, значит что-то пошло не так
+            await self.start_registration_process(bot_instance, chat_id)
+            return
+
+        self.user_states[chat_id_str] = {'state': 'waiting_identity_selection', 'data': user_data, 'candidates': candidates}
+
+        keyboard_rows = []
+        for idx, p in enumerate(candidates):
+            btn_text = f"{p['fio']} ({p['birth_date']})"
+            keyboard_rows.append([{'type': 'callback', 'text': btn_text, 'payload': f"reg_identity_{idx}"}])
+        
+        # Ручной ввод убран по требованию
+        
+        keyboard = create_keyboard(keyboard_rows)
+
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="🔍 На ваш номер зарегистрировано несколько медицинских карт.\nЧтобы пройти регистрацию выберете себя!",
+            attachments=[keyboard]
+        )
+
     async def handle_data_confirmation(self, bot_instance: Bot, chat_id_str: str, chat_id: int):
         """Обработка подтверждения данных"""
         log_user_event(chat_id_str, "user_confirmed_registration")
         user_data = self.user_states.get(chat_id_str, {}).get('data', {})
 
-        if user_data and all(key in user_data for key in ['fio', 'birth_date', 'phone']):
+        if user_data and all(key in user_data for key in ['fio', 'birth_date', 'phone', 'snils', 'oms', 'gender']):
             return await self.complete_registration(bot_instance, chat_id, user_data)
         else:
-            missing_fields = [key for key in ['fio', 'birth_date', 'phone'] if key not in user_data]
+            missing_fields = [key for key in ['fio', 'birth_date', 'phone', 'snils', 'oms', 'gender'] if key not in user_data]
             log_data_event(chat_id_str, "incomplete_data_on_confirmation", missing=missing_fields)
             await bot_instance.send_message(chat_id=chat_id,
                                             text="❌ Не все данные заполнены. Начинаем регистрацию заново.")
@@ -318,11 +521,20 @@ class RegistrationHandler:
             'waiting_fio': lambda: self._handle_fio_input(chat_id_str, message_text, bot_instance, chat_id, user_data),
             'waiting_birth_date': lambda: self._handle_birth_date_input(chat_id_str, message_text, bot_instance,
                                                                         chat_id, user_data),
+            'waiting_snils': lambda: self._handle_snils_input(chat_id_str, message_text, bot_instance, chat_id, user_data),
+            'waiting_oms': lambda: self._handle_oms_input(chat_id_str, message_text, bot_instance, chat_id, user_data),
+            'waiting_gender': lambda: self._handle_gender_input(chat_id_str, message_text, bot_instance, chat_id, user_data),
             'waiting_fio_correction': lambda: self._handle_fio_correction(chat_id_str, message_text, bot_instance,
                                                                           chat_id, user_data),
             'waiting_birth_date_correction': lambda: self._handle_birth_date_correction(chat_id_str, message_text,
                                                                                         bot_instance, chat_id,
                                                                                         user_data),
+            'waiting_snils_correction': lambda: self._handle_snils_correction(chat_id_str, message_text, bot_instance,
+                                                                              chat_id, user_data),
+            'waiting_oms_correction': lambda: self._handle_oms_correction(chat_id_str, message_text, bot_instance,
+                                                                          chat_id, user_data),
+            'waiting_gender_correction': lambda: self._handle_gender_correction(chat_id_str, message_text, bot_instance,
+                                                                                chat_id, user_data),
         }
 
         if state in state_handlers:
@@ -340,14 +552,84 @@ class RegistrationHandler:
             await self.request_birth_date(bot_instance, chat_id, user_data)
         return success
 
+    async def _handle_snils_input(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
+                                  user_data: dict):
+        """Обработка ввода СНИЛС"""
+        success = await self.validate_and_process_input(chat_id_str, message_text, 'snils', bot_instance, chat_id,
+                                                        user_data)
+        if success:
+            await self.request_oms(bot_instance, chat_id, user_data)
+        return success
+
+    async def _handle_oms_input(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
+                                user_data: dict):
+        """Обработка ввода ОМС"""
+        success = await self.validate_and_process_input(chat_id_str, message_text, 'oms', bot_instance, chat_id,
+                                                        user_data)
+        if success:
+            await self.request_gender(bot_instance, chat_id, user_data)
+        return success
+
+    async def _handle_gender_input(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
+                                   user_data: dict):
+        """Обработка ввода пола (текст)"""
+        success = await self.validate_and_process_input(chat_id_str, message_text, 'gender', bot_instance, chat_id,
+                                                        user_data)
+        if success:
+            current_state = self.user_states.get(chat_id_str, {})
+            new_state = {'state': 'waiting_confirmation', 'data': user_data}
+            if 'candidates' in current_state:
+                new_state['candidates'] = current_state['candidates']
+
+            self.user_states[chat_id_str] = new_state
+            await self.send_confirmation_message(bot_instance, chat_id, user_data)
+        return success
+
+    async def handle_gender_choice(self, bot_instance: Bot, chat_id_str: str, chat_id: int, gender: str):
+        """Обработка выбора пола через кнопки"""
+        current_state = self.user_states.get(chat_id_str, {})
+        user_data = current_state.get('data', {})
+        
+        # Валидация и сохранение
+        if gender not in ["Мужской", "Женский"]:
+            return False
+            
+        user_data['gender'] = gender
+        log_data_event(chat_id_str, "gender_selected", gender=gender)
+        
+        # Если это была коррекция — возвращаемся к подтверждению
+        if current_state.get('state') == 'waiting_gender_correction':
+             self.user_states[chat_id_str] = {'state': 'waiting_confirmation', 'data': user_data}
+             await self.send_confirmation_message(bot_instance, chat_id, user_data)
+             return True
+             
+        # Если обычный флоу регистрации — переходим к подтверждению
+        next_state = {
+            'state': 'waiting_confirmation',
+            'data': user_data,
+        }
+        # Пробрасываем кандидатов, если они были
+        if 'candidates' in current_state:
+            next_state['candidates'] = current_state['candidates']
+
+        self.user_states[chat_id_str] = next_state
+        await self.send_confirmation_message(bot_instance, chat_id, user_data)
+        return True
+
     async def _handle_birth_date_input(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
                                        user_data: dict):
         """Обработка ввода даты рождения"""
         success = await self.validate_and_process_input(chat_id_str, message_text, 'birth_date', bot_instance, chat_id,
                                                         user_data)
         if success:
-            self.user_states[chat_id_str] = {'state': 'waiting_confirmation', 'data': user_data}
-            await self.send_confirmation_message(bot_instance, chat_id, user_data)
+            # Дополнительная проверка на 18+
+            if not self._is_adult(message_text):
+                await bot_instance.send_message(chat_id=chat_id, 
+                                                text="⛔ Регистрация доступна только для пользователей старше 18 лет.")
+                # Оставляем в текущем состоянии, чтобы мог исправить или отменить
+                return True
+
+            await self.request_snils(bot_instance, chat_id, user_data)
         return success
 
     async def _handle_fio_correction(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
@@ -369,3 +651,30 @@ class RegistrationHandler:
             self.user_states[chat_id_str] = {'state': 'waiting_confirmation', 'data': user_data}
             await self.send_confirmation_message(bot_instance, chat_id, user_data)
         return success
+
+    async def _handle_snils_correction(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
+                                       user_data: dict):
+        """Обработка исправления СНИЛС"""
+        success = await self.validate_and_process_input(chat_id_str, message_text, 'snils', bot_instance, chat_id,
+                                                        user_data)
+        if success:
+            self.user_states[chat_id_str] = {'state': 'waiting_confirmation', 'data': user_data}
+            await self.send_confirmation_message(bot_instance, chat_id, user_data)
+        return success
+
+    async def _handle_oms_correction(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
+                                     user_data: dict):
+        """Обработка исправления ОМС"""
+        success = await self.validate_and_process_input(chat_id_str, message_text, 'oms', bot_instance, chat_id,
+                                                        user_data)
+        if success:
+            self.user_states[chat_id_str] = {'state': 'waiting_confirmation', 'data': user_data}
+            await self.send_confirmation_message(bot_instance, chat_id, user_data)
+        return success
+
+    async def _handle_gender_correction(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
+                                        user_data: dict):
+        """Обработка исправления пола (текст)"""
+        # Если пользователь ввел текст вместо кнопки - просим нажать кнопку
+        await self.request_gender(bot_instance, chat_id, user_data)
+        return True

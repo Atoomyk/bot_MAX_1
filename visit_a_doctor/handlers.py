@@ -190,7 +190,9 @@ async def handle_callback(bot, chat_id, payload):
     if payload == "doc_edit_gender": 
         ctx.step = "ENTER_GENDER"
         ctx.return_to_confirm = True
-        await bot.send_message(chat_id=chat_id, text="Введите пол (м/ж):")
+        ctx.step = "ENTER_GENDER"
+        ctx.return_to_confirm = True
+        await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
         return
         
     if payload == "doc_edit_snils": 
@@ -241,9 +243,40 @@ async def handle_callback(bot, chat_id, payload):
         
         # Генерируем новый Session_ID для этой сессии записи
         ctx.client_session_id = str(uuid.uuid4())
-        print(f"DEBUG: Generated new Session_ID: {ctx.client_session_id}")
         
         if selection == 'other':
+            # ⚡ ЗАПРОС К API ПАЦИЕНТОВ ПО ТЕЛЕФОНУ ВЛАДЕЛЬЦА ⚡
+            user_data = db.get_user_full_data(str(chat_id))
+            phone = user_data.get('phone', '') if user_data else ''
+
+            if phone:
+                await bot.send_message(chat_id=chat_id, text="🔄 Проверяем список прикрепленных пациентов...")
+                from patient_api_client import get_patients_by_phone
+                found_patients = await get_patients_by_phone(phone)
+                
+                # Если нашли больше одного человека — предлагаем выбор.
+                # Если только один (это скорее всего сам юзер), то сразу переходим к ручному вводу (требование),
+                # поэтому условие > 1.
+                if found_patients and len(found_patients) > 1:
+                    # Сохраняем кандидатов в контексте
+                    ctx.family_candidates = found_patients
+                    
+                    keyboard_rows = []
+                    for idx, p in enumerate(found_patients):
+                        btn_text = f"{p['fio']} ({p['birth_date']})"
+                        keyboard_rows.append([{'type': 'callback', 'text': btn_text, 'payload': f"doc_other_select_{idx}"}])
+                    
+                    keyboard_rows.append([{'type': 'callback', 'text': '➕ Ввести вручную', 'payload': "doc_other_select_manual"}])
+                    keyboard = kb.create_keyboard(keyboard_rows)
+                    
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="📋 Выберите пациента из списка или введите данные вручную:",
+                        attachments=[keyboard]
+                    )
+                    return
+
+            # Если не нашли или нет телефона — ручной ввод
             ctx.step = "ENTER_FIO"
             ctx.return_to_confirm = False
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.\n\nПример: **Иванов Иван Иванович**")
@@ -253,29 +286,71 @@ async def handle_callback(bot, chat_id, payload):
             if user_data:
                 ctx.patient_fio = user_data.get('fio', '')
                 ctx.patient_birthdate = user_data.get('birth_date', '')
-                # Пол, СНИЛС и ОМС не храним в БД — спрашиваем
-                ctx.step = "ENTER_GENDER"
-                ctx.return_to_confirm = False
-                await bot.send_message(chat_id=chat_id, text="Введите пол (м/ж):")
+                ctx.patient_snils = user_data.get('snils', '')
+                ctx.patient_oms = user_data.get('oms', '')
+                ctx.patient_gender = user_data.get('gender', '')
+
+                # Проверяем, чего не хватает
+                if not ctx.patient_gender:
+                    ctx.step = "ENTER_GENDER"
+                    ctx.return_to_confirm = False
+                    ctx.step = "ENTER_GENDER"
+                    ctx.return_to_confirm = False
+                    await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
+                elif not ctx.patient_snils:
+                    ctx.step = "ENTER_SNILS"
+                    ctx.return_to_confirm = False
+                    await bot.send_message(chat_id=chat_id, text="Введите СНИЛС пациента (11 цифр).")
+                elif not ctx.patient_oms:
+                    ctx.step = "ENTER_OMS"
+                    ctx.return_to_confirm = False
+                    await bot.send_message(chat_id=chat_id, text="Введите номер полиса ОМС.")
+                else:
+                    # Все есть, переходим к подтверждению
+                    await show_patient_confirmation(bot, chat_id, ctx)
             else:
                  await bot.send_message(chat_id=chat_id, text="❌ Ошибка: не удалось получить данные профиля. Попробуйте записать 'другого человека'.")
                  return
         return
 
-    # 1.5 Пол (Other)
-    if ctx.step == "ENTER_GENDER":
-        text = ctx.last_message_text
-        gender_input = text.lower().strip()
-        if gender_input in ['м', 'm', 'мужской']:
-            ctx.patient_gender = "Мужской"
-        elif gender_input in ['ж', 'f', 'женский']:
-            ctx.patient_gender = "Женский"
-        else:
-            await bot.send_message(chat_id=chat_id, 
-                                text="❌ Некорректный ввод. Пожалуйста, введите 'м' для мужского пола или 'ж' для женского.")
-            return True
+    # 1.1 Выбор пациента (Other) из списка
+    if payload.startswith('doc_other_select_'):
+        selection_idx = payload.replace('doc_other_select_', '')
+        
+        if selection_idx == 'manual':
+            ctx.step = "ENTER_FIO"
+            ctx.return_to_confirm = False
+            await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.\n\nПример: **Иванов Иван Иванович**")
+            return
+
+        try:
+            params = getattr(ctx, 'family_candidates', [])
+            idx = int(selection_idx)
+            selected_p = params[idx]
             
-        if ctx.return_to_confirm:
+            ctx.patient_fio = selected_p['fio']
+            ctx.patient_birthdate = selected_p['birth_date']
+            ctx.patient_snils = selected_p['snils']
+            ctx.patient_oms = selected_p['oms']
+            # Пол API не отдает, поэтому всегда запрашиваем
+            ctx.patient_gender = None 
+            
+            ctx.step = "ENTER_GENDER"
+            ctx.return_to_confirm = False
+            await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
+            
+        except (ValueError, IndexError):
+             await bot.send_message(chat_id=chat_id, text="⚠ Ошибка выбора. Введите данные вручную.")
+             ctx.step = "ENTER_FIO"
+             ctx.return_to_confirm = False
+             await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.")
+        return
+
+    # 1.5 Пол (Other) - Обработка кнопок
+    if payload in ['doc_gender_male', 'doc_gender_female']:
+        ctx.patient_gender = "Мужской" if payload == 'doc_gender_male' else "Женский"
+        
+        if getattr(ctx, 'return_to_confirm', False):
             await show_patient_confirmation(bot, chat_id, ctx)
             return True
             
@@ -285,6 +360,12 @@ async def handle_callback(bot, chat_id, payload):
             text="Введите СНИЛС пациента (11 цифр).\n\nПример: **12300012300**"
         )
         return True
+
+    # 1.5 Пол (Other) - Текст (оставим как фоллбек, но кнопки приоритетнее)
+    if ctx.step == "ENTER_GENDER":
+        # Если пришел странный payload не являющийся текстом (хотя сюда payload попадает)
+        # Логика обработки текста в handlers_text_input.py, здесь только колбэки
+        pass
 
     # 2. Выбор МО
     if payload.startswith('doc_mo_'):
@@ -569,7 +650,18 @@ async def handle_text_input(bot, chat_id, text):
                                    text="❌ Некорректный ввод. Введите 'м' для мужского пола или 'ж' для женского.")
             return True
 
-        # После ввода пола переходим к СНИЛС
+        # После ввода пола проверяем СНИЛС
+        if getattr(ctx, 'patient_snils', None):
+             # СНИЛС есть, проверяем ОМС
+             if getattr(ctx, 'patient_oms', None):
+                 # Все есть
+                 await show_patient_confirmation(bot, chat_id, ctx)
+                 return True
+             else:
+                 ctx.step = "ENTER_OMS"
+                 await bot.send_message(chat_id=chat_id, text="Введите номер полиса ОМС.")
+                 return True
+
         ctx.step = "ENTER_SNILS"
         await bot.send_message(chat_id=chat_id,
                                text="Введите СНИЛС пациента (11 цифр).\nПример: 12300012300")
@@ -587,6 +679,12 @@ async def handle_text_input(bot, chat_id, text):
         if getattr(ctx, 'return_to_confirm', False):
             await show_patient_confirmation(bot, chat_id, ctx)
             return True
+
+        # После ввода СНИЛС проверяем ОМС
+        if getattr(ctx, 'patient_oms', None):
+             # ОМС есть, все ок
+             await show_patient_confirmation(bot, chat_id, ctx)
+             return True
 
         ctx.step = "ENTER_OMS"
         await bot.send_message(chat_id=chat_id,

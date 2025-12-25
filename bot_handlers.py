@@ -426,6 +426,37 @@ async def message_callback(event: MessageCallback):
             log_user_event(chat_id_str, "birth_date_correction_requested")
             await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'birth_date')
 
+        elif payload == "correct_snils":
+            log_user_event(chat_id_str, "snils_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'snils')
+
+        elif payload == "correct_oms":
+            log_user_event(chat_id_str, "oms_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'oms')
+
+        elif payload == "correct_gender":
+            log_user_event(chat_id_str, "gender_correction_requested")
+            # Для пола отдельный обработчик, так как там кнопки, а не текст
+             # Но handle_data_correction вызывает request_data_correction, которая отправляет сообщение.
+             # Я настроил config['gender'] в registration_handler.py.
+             # Но там 'message'.
+             # Лучше тут вызвать request_gender напрямую.
+             # Но регистрация ожидает handle_data_correction чтобы очистить старое значение.
+            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'gender')
+
+        elif payload == "gender_male":
+            await registration_handler.handle_gender_choice(event.bot, chat_id_str, chat_id, "Мужской")
+
+        elif payload == "gender_female":
+            await registration_handler.handle_gender_choice(event.bot, chat_id_str, chat_id, "Женский")
+
+        elif payload.startswith("reg_identity_"):
+            selection = payload.replace("reg_identity_", "")
+            await registration_handler.handle_identity_selection(event.bot, chat_id_str, chat_id, selection)
+
+        elif payload == "reg_back_to_list":
+            await registration_handler.handle_back_to_list(event.bot, chat_id_str, chat_id)
+
         elif payload == "confirm_data":
             log_user_event(chat_id_str, "registration_data_confirmed")
             greeting_name = await registration_handler.handle_data_confirmation(event.bot, chat_id_str, chat_id)

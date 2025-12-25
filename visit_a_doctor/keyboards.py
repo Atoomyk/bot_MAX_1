@@ -24,21 +24,28 @@ def kb_mo_selection(medical_organizations):
     Шаг 2: Выбор МО
     :param medical_organizations: list[dict] {'id': str, 'name': str}
     """
-    buttons = []
     if not medical_organizations:
         return None
 
-    for mo in medical_organizations:
-        # 1. Сначала пробуем найти сокращение в словаре
-        name = Abbreviations_MO.get(mo['name'], mo['name'])
+    buttons = []
+    
+    # Генерируем кнопки с номерами 1, 2, 3...
+    row = []
+    for i, mo in enumerate(medical_organizations):
+        row.append({
+            'type': 'callback', 
+            'text': str(i + 1), 
+            'payload': f"doc_mo_{mo['id']}"
+        })
         
-        # 2. Если все еще длинное (и не было в словаре или сокращение тоже длинное), режем
-        if len(name) > 60:
-             name = name[:60] + '..'
-             
-        buttons.append([
-            {'type': 'callback', 'text': name, 'payload': f"doc_mo_{mo['id']}"}
-        ])
+        # По 5 кнопок в ряд
+        if len(row) == 5:
+            buttons.append(row)
+            row = []
+            
+    if row:
+        buttons.append(row)
+        
     buttons.append([get_back_button('doc_back_to_person')])
     return create_keyboard(buttons)
 

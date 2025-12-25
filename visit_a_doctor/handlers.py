@@ -66,6 +66,47 @@ async def start_booking(bot, chat_id):
         attachments=[kb.kb_person_selection()]
     )
 
+async def send_mo_selection_menu(bot, chat_id, mos, ctx):
+    """(Helper) Отправляет меню выбора МО с нумерацией"""
+    
+    menu_text = "🏥 Выберите медицинскую организацию:\n\n"
+    import re
+    
+    for i, mo in enumerate(mos):
+        mo_name = mo['name']
+        mo_address = mo.get('address', '')
+        
+        # Очистка адреса от "г. Севастополь"
+        if mo_address:
+            # Убираем дублирование города (г. Севастополь, Севастополь г и т.д.)
+            cleaned_address = re.sub(r'(?i)(г\.\s*)?Севастополь(\s*г)?', '', mo_address)
+            # Убираем лишние запятые и пробелы, которые могли остаться
+            cleaned_address = re.sub(r',+', ',', cleaned_address)
+            cleaned_address = cleaned_address.strip(' ,')
+            
+            # Если остался индекс (6 цифр в начале), можно оставить или убрать. 
+            # Часто просят просто адрес. XML пример: "299703, , г. Инкерман..." -> "299703, , г. Инкерман"
+            # Оставим как есть после чистки города.
+            # UPD: Убираем индекс по запросу
+            cleaned_address = re.sub(r'\b\d{6}\b', '', cleaned_address)
+
+            # Финальная зачистка
+            cleaned_address = re.sub(r',+', ',', cleaned_address)
+            cleaned_address = cleaned_address.strip(' ,')
+            
+            display_str = f"{mo_name} ({cleaned_address})"
+        else:
+            display_str = mo_name
+                
+        menu_text += f"{i + 1}. {display_str}\n\n"
+
+    ctx.step = "MO"
+    await bot.send_message(
+        chat_id=chat_id,
+        text=menu_text,
+        attachments=[kb.kb_mo_selection(mos)]
+    )
+
 async def process_mo_selection(bot, chat_id, ctx):
     """(Helper) Загружает и показывает список МО"""
     xml = await SoapClient.get_mos(ctx.session_id)
@@ -78,12 +119,7 @@ async def process_mo_selection(bot, chat_id, ctx):
     # Кэшируем
     get_cache(chat_id)['mos'] = mos
     
-    ctx.step = "MO"
-    await bot.send_message(
-        chat_id=chat_id,
-        text="Выберите медицинскую организацию для записи:",
-        attachments=[kb.kb_mo_selection(mos)]
-    )
+    await send_mo_selection_menu(bot, chat_id, mos, ctx)
 
 async def handle_callback(bot, chat_id, payload):
     ctx = await get_or_create_context(str(chat_id))
@@ -103,13 +139,19 @@ async def handle_callback(bot, chat_id, payload):
         if not mos: # Ре-фетч если кэш пропал
              await process_mo_selection(bot, chat_id, ctx)
              return
-        ctx.step = "MO"
-        await bot.send_message(chat_id=chat_id, text="Выберите медицинскую организацию для записи:", attachments=[kb.kb_mo_selection(mos)])
+        await send_mo_selection_menu(bot, chat_id, mos, ctx)
         return
     elif payload == 'doc_back_to_spec':
         specs = cache.get('specs', [])
         ctx.step = "SPEC"
-        await bot.send_message(chat_id=chat_id, text="Выберите специальность:", attachments=[kb.kb_spec_selection(specs, ctx.spec_page)])
+        
+        # Get MO Name for display
+        mos = cache.get('mos', [])
+        mo_name = next((m['name'] for m in mos if m['id'] == ctx.selected_mo_id), "")
+        from visit_a_doctor.specialties_MO import Abbreviations_MO
+        short_mo_name = Abbreviations_MO.get(mo_name, mo_name)
+        
+        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность:", attachments=[kb.kb_spec_selection(specs, ctx.spec_page)])
         return
     elif payload == 'doc_back_to_doc':
         doctors = cache.get('doctors', [])
@@ -277,7 +319,14 @@ async def handle_callback(bot, chat_id, payload):
         cache['specs'] = specs_ui
         ctx.step = "SPEC"
         ctx.spec_page = 0
-        await bot.send_message(chat_id=chat_id, text="Выберите специальность:", attachments=[kb.kb_spec_selection(specs_ui, ctx.spec_page)])
+        
+        # Get MO Name for display
+        # selected_mo already retrieved above
+        mo_name = selected_mo['name']
+        from visit_a_doctor.specialties_MO import Abbreviations_MO
+        short_mo_name = Abbreviations_MO.get(mo_name, mo_name)
+        
+        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность:", attachments=[kb.kb_spec_selection(specs_ui, ctx.spec_page)])
         return
 
     # 3. Выбор специальности
@@ -285,7 +334,14 @@ async def handle_callback(bot, chat_id, payload):
         page = int(payload.split('_')[-1])
         ctx.spec_page = page
         specs = cache.get('specs', [])
-        await bot.send_message(chat_id=chat_id, text=f"Выберите специальность (стр. {page+1}):", attachments=[kb.kb_spec_selection(specs, page)])
+        
+        # Get MO Name for display
+        mos = cache.get('mos', [])
+        mo_name = next((m['name'] for m in mos if m['id'] == ctx.selected_mo_id), "")
+        from visit_a_doctor.specialties_MO import Abbreviations_MO
+        short_mo_name = Abbreviations_MO.get(mo_name, mo_name)
+        
+        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность (стр. {page+1}):", attachments=[kb.kb_spec_selection(specs, page)])
         return
         
     if payload.startswith('doc_spec_'):

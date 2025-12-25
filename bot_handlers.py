@@ -19,6 +19,28 @@ from visit_a_doctor.states import UserContext as DoctorUserContext
 
 # --- ОБРАБОТЧИКИ СОБЫТИЙ ---
 
+async def send_welcome_message(bot, chat_id):
+    """Отправляет приветственное сообщение с картинкой"""
+    keyboard = create_keyboard([[
+        {'type': 'callback', 'text': 'Продолжить', 'payload': "start_continue"}
+    ]])
+
+    attachments = []
+    import os
+    image_path = os.path.join(os.getcwd(), 'start_foto.png')
+    if os.path.exists(image_path):
+        attachments.append(InputMedia(path=image_path))
+    
+    if keyboard:
+        attachments.append(keyboard)
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text='Здравствуйте! 👩‍⚕️\n\nВас приветствует чат-бот "Цифровое здравоохранение Севастополя"!\nТут можно быстро и легко:\n📌 Записаться к врачу\n📌 Получать уведомления о записях к врачам\n📌 Отменять приёмы при необходимости\n📌 Обратиться в онлайн-чат поддержки по любому вопросу',
+        attachments=attachments
+    )
+
+
 @dp.bot_started()
 @anti_duplicate()
 async def bot_started(event: BotStarted):
@@ -45,25 +67,8 @@ async def bot_started(event: BotStarted):
             log_user_event(chat_id_str, "already_registered")
         else:
             log_user_event(chat_id_str, "new_user_detected")
-            keyboard = create_keyboard([[
-                {'type': 'callback', 'text': 'Продолжить', 'payload': "start_continue"}
-            ]])
+            await send_welcome_message(event.bot, chat_id)
 
-            attachments = []
-            import os
-            image_path = os.path.join(os.getcwd(), 'start_foto.png')
-            if os.path.exists(image_path):
-                attachments.append(InputMedia(path=image_path))
-            
-            if keyboard:
-                attachments.append(keyboard)
-
-            await event.bot.send_message(
-                chat_id=chat_id,
-                text='Здравствуйте! 👩‍⚕️\n\nВас приветствует чат-бот "Цифровое здравоохранение Севастополя"!\nТут можно быстро и легко:\n📌 Записаться к врачу\n📌 Получать уведомления о записях к врачам\n📌 Отменять приёмы при необходимости\n📌 Обратиться в онлайн-чат поддержки по любому вопросу',
-                #text='Здравствуйте! 👩‍⚕️\n\nВы обратились в Медицинский информационно-аналитический центр города Севастополя.\nНаша система позволяет Вам удобно и быстро решить следующие задачи:\n\n📌 Записаться на приём к врачу;\n📌 Вызвать врача на дом;\n📌 Записаться на профилактический медосмотр/диспансеризацию;\n📌 Прикрепиться к поликлинике;\n📌 Получать уведомления о записи к врачу с возможностью её отмены;\n📌 Найти ближайшие государственные медицинские учреждения.',
-                attachments=attachments
-            )
     except Exception as e:
         log_system_event("bot_started", "message_send_failed", error=str(e), chat_id=chat_id_str)
 
@@ -383,14 +388,8 @@ async def message_callback(event: MessageCallback):
                 greeting_name = db.get_user_greeting(chat_id_str)
                 await send_main_menu(event.bot, chat_id, greeting_name)
             else:
-                keyboard = create_keyboard([[
-                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
-                ]])
-                await event.bot.send_message(
-                    chat_id=chat_id,
-                    text="Для использования бота необходимо зарегистрироваться.",
-                    attachments=[keyboard] if keyboard else []
-                )
+                await send_welcome_message(event.bot, chat_id)
+
             return
 
         # Обработка админских callback для синхронизации
@@ -444,14 +443,8 @@ async def message_callback(event: MessageCallback):
                 greeting_name = db.get_user_greeting(chat_id_str)
                 await send_main_menu(event.bot, chat_id, greeting_name)
             else:
-                keyboard = create_keyboard([[
-                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
-                ]])
-                await event.bot.send_message(
-                    chat_id=chat_id,
-                    text="Для использования бота необходимо зарегистрироваться.",
-                    attachments=[keyboard] if keyboard else []
-                )
+                await send_welcome_message(event.bot, chat_id)
+
 
         # Управление напоминаниями
         elif payload == "reminders_settings":
@@ -621,14 +614,8 @@ async def handle_message(event: MessageCreated):
 
         if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
             log_user_event(chat_id_str, "message_ignored_unregistered")
-            keyboard = create_keyboard([[
-                {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
-            ]])
-            await event.bot.send_message(
-                chat_id=chat_id,
-                text="Для использования бота необходимо зарегистрироваться.",
-                attachments=[keyboard] if keyboard else []
-            )
+            await send_welcome_message(event.bot, chat_id)
+
             return
 
         # Обработка регистрации только если есть текст (не обрабатываем только изображения)
@@ -653,14 +640,8 @@ async def handle_message(event: MessageCreated):
             return
 
         if not user_states.get(chat_id_str):
-            keyboard = create_keyboard([[
-                {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
-            ]])
-            await event.bot.send_message(
-                chat_id=chat_id,
-                text="Для использования бота необходимо зарегистрироваться.",
-                attachments=[keyboard] if keyboard else []
-            )
+            await send_welcome_message(event.bot, chat_id)
+
 
     except Exception as e:
         chat_id_str = str(event.message.recipient.chat_id) if hasattr(event, 'message') and hasattr(event.message, 'recipient') else 'unknown'

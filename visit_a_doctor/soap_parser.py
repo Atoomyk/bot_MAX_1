@@ -74,12 +74,14 @@ class SoapResponseParser:
                 mo_id = mo_node.find("MO_Id")
                 name = mo_node.find("MO_Name")
                 oid = mo_node.find("MO_OID")
+                address = mo_node.find("MO_Address")
                 
                 if mo_id is not None and name is not None:
                     mos.append({
                         "id": mo_id.text,
                         "name": name.text,
-                        "oid": oid.text if oid is not None else ""
+                        "oid": oid.text if oid is not None else "",
+                        "address": address.text if address is not None else ""
                     })
 
         except Exception as e:

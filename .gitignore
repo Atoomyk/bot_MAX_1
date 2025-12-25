@@ -1,6 +1,6 @@
 tickets
 .json
-
+help/
 commands/*.json
 ggg.py
 Soglasie.txt

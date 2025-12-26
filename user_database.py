@@ -383,6 +383,33 @@ class UserDatabase:
             self.conn.rollback()
             return False
 
+    def update_user_data(self, chat_id: str, fio: str, birth_date: str, snils: str = None, oms: str = None, gender: str = None) -> bool:
+        """
+        Обновляет данные пользователя в БД.
+        Используется для синхронизации с РМИС.
+        """
+        try:
+            # Валидация пропускается или делается частичной, т.к. данные из РМИС считаем "мастер-данными"
+            # Но на всякий случай базовую очистку делаем
+            snils_cleaned = re.sub(r'[\s\-]', '', snils) if snils else None
+            oms_cleaned = re.sub(r'[\s\-]', '', oms) if oms else None
+            
+            self.cursor.execute(
+                """
+                UPDATE users 
+                SET fio = %s, birth_date = %s, snils = %s, oms = %s, gender = %s
+                WHERE chat_id = %s
+                """,
+                (fio, birth_date, snils_cleaned, oms_cleaned, gender, chat_id)
+            )
+            self.conn.commit()
+            log_system_event("database", "user_data_updated", chat_id=chat_id)
+            return True
+        except psycopg2.Error as e:
+            log_system_event("database", "user_update_failed", error=str(e), chat_id=chat_id)
+            self.conn.rollback()
+            return False
+
     def close_connection(self):
         if self.cursor:
             self.cursor.close()

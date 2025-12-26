@@ -46,11 +46,12 @@ async def show_patient_confirmation(bot, chat_id, ctx):
     )
     
     is_self_booking = getattr(ctx, 'selected_person', '') == 'me'
+    is_from_rms = getattr(ctx, 'is_from_rms', False)
     
     await bot.send_message(
         chat_id=chat_id,
         text=summary,
-        attachments=[kb.kb_confirm_patient_data(is_self_booking=is_self_booking)]
+        attachments=[kb.kb_confirm_patient_data(is_self_booking=is_self_booking, allow_edit=not is_from_rms)]
     )
 
 async def start_booking(bot, chat_id):
@@ -207,6 +208,13 @@ async def handle_callback(bot, chat_id, payload):
         await bot.send_message(chat_id=chat_id, text="Введите полис ОМС:")
         return
 
+    if payload == "doc_incorrect_data":
+        await bot.send_message(
+            chat_id=chat_id,
+            text="ℹ️ Если вы заметили ошибку в своих данных, обратитесь в медицинскую организацию по месту прописки — там смогут внести корректные сведения в вашу медицинскую карту.\nСейчас вы можете, нажать кнопку <<Всё верно, продолжить>>, и записаться к врачу."
+        )
+        return
+
 
     # --- ЛОГИКА ШАГОВ ---
 
@@ -284,6 +292,66 @@ async def handle_callback(bot, chat_id, payload):
             # Запись себя: берем данные из БД
             user_data = db.get_user_full_data(str(chat_id))
             if user_data:
+                # Начинаем с False
+                ctx.is_from_rms = False
+
+                # ⚡ СИНХРОНИЗАЦИЯ С РМИС (при каждом старте записи себя) ⚡
+                phone = user_data.get('phone', '')
+                if phone:
+                    await bot.send_message(chat_id=chat_id, text="🔄 Проверяем актуальность данных...")
+                    from patient_api_client import get_patients_by_phone
+                    found_patients = await get_patients_by_phone(phone)
+                    
+                    # Пытаемся найти текущего пользователя в списке по СНИЛС или ФИО+ДР
+                    my_snils = user_data.get('snils', '')
+                    # Очистка СНИЛСа для сравнения
+                    import re
+                    my_snils_clean = re.sub(r'[\D]', '', my_snils) if my_snils else ""
+
+                    matched_patient = None
+                    
+                    if found_patients:
+                        for p in found_patients:
+                            p_snils_clean = re.sub(r'[\D]', '', p.get('snils', ''))
+                            # Сравниваем по СНИЛС
+                            if my_snils_clean and p_snils_clean and my_snils_clean == p_snils_clean:
+                                matched_patient = p
+                                break
+                            # Сравниваем по ФИО + ДР (если нет СНИЛСа)
+                            if not matched_patient:
+                                if (p.get('fio', '').lower() == user_data.get('fio', '').lower() and 
+                                    p.get('birth_date', '') == user_data.get('birth_date', '')):
+                                    matched_patient = p
+                                    break
+                    
+                    if matched_patient:
+                        # Нашли в РМИС -> Обновляем БД если есть изменения
+                        need_update = False
+                        
+                        # Сравниваем поля. Данные из РМИС считаем эталоном.
+                        if matched_patient.get('fio') != user_data.get('fio'): need_update = True
+                        if matched_patient.get('birth_date') != user_data.get('birth_date'): need_update = True
+                        if matched_patient.get('snils') != user_data.get('snils'): need_update = True
+                        if matched_patient.get('oms') != user_data.get('oms'): need_update = True
+                        
+                        if need_update:
+                            db.update_user_data(
+                                str(chat_id),
+                                matched_patient['fio'],
+                                matched_patient['birth_date'],
+                                matched_patient.get('snils'),
+                                matched_patient.get('oms'),
+                                user_data.get('gender') # Пол РМИС не всегда отдает, оставляем из БД
+                            )
+                            # Обновляем локальные user_data
+                            user_data['fio'] = matched_patient['fio']
+                            user_data['birth_date'] = matched_patient['birth_date']
+                            user_data['snils'] = matched_patient.get('snils')
+                            user_data['oms'] = matched_patient.get('oms')
+                        
+                        ctx.is_from_rms = True
+                        await bot.send_message(chat_id=chat_id, text="✅ Ваши данные синхронизированы с Региональной системой.")
+
                 ctx.patient_fio = user_data.get('fio', '')
                 ctx.patient_birthdate = user_data.get('birth_date', '')
                 ctx.patient_snils = user_data.get('snils', '')
@@ -292,8 +360,6 @@ async def handle_callback(bot, chat_id, payload):
 
                 # Проверяем, чего не хватает
                 if not ctx.patient_gender:
-                    ctx.step = "ENTER_GENDER"
-                    ctx.return_to_confirm = False
                     ctx.step = "ENTER_GENDER"
                     ctx.return_to_confirm = False
                     await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
@@ -320,6 +386,7 @@ async def handle_callback(bot, chat_id, payload):
         if selection_idx == 'manual':
             ctx.step = "ENTER_FIO"
             ctx.return_to_confirm = False
+            ctx.is_from_rms = False
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.\n\nПример: **Иванов Иван Иванович**")
             return
 
@@ -334,6 +401,7 @@ async def handle_callback(bot, chat_id, payload):
             ctx.patient_oms = selected_p['oms']
             # Пол API не отдает, поэтому всегда запрашиваем
             ctx.patient_gender = None 
+            ctx.is_from_rms = True
             
             ctx.step = "ENTER_GENDER"
             ctx.return_to_confirm = False
@@ -352,6 +420,17 @@ async def handle_callback(bot, chat_id, payload):
         
         if getattr(ctx, 'return_to_confirm', False):
             await show_patient_confirmation(bot, chat_id, ctx)
+            return True
+
+        # Если СНИЛС уже есть (из РМИС), переходим к следующему шагу
+        if getattr(ctx, 'patient_snils', None):
+            if getattr(ctx, 'patient_oms', None):
+                # И полис есть - сразу к подтверждению
+                await show_patient_confirmation(bot, chat_id, ctx)
+            else:
+                # Полиса нет - просим полис
+                ctx.step = "ENTER_OMS"
+                await bot.send_message(chat_id=chat_id, text="Введите номер полиса ОМС.")
             return True
             
         ctx.step = "ENTER_SNILS"

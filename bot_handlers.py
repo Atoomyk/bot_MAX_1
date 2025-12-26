@@ -450,6 +450,9 @@ async def message_callback(event: MessageCallback):
         elif payload == "gender_female":
             await registration_handler.handle_gender_choice(event.bot, chat_id_str, chat_id, "Женский")
 
+        elif payload == "reg_incorrect_data":
+             await registration_handler.handle_incorrect_data_info(event.bot, chat_id)
+
         elif payload.startswith("reg_identity_"):
             selection = payload.replace("reg_identity_", "")
             await registration_handler.handle_identity_selection(event.bot, chat_id_str, chat_id, selection)

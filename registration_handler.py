@@ -165,27 +165,39 @@ class RegistrationHandler:
         snils = user_data.get('snils', 'Не указано')
         oms = user_data.get('oms', 'Не указано')
         gender = user_data.get('gender', 'Не указано')
+        
+        is_from_rms = user_data.get('is_from_rms', False)
 
-        log_data_event(str(chat_id), "confirmation_prepared", fio=fio, birth_date=birth_date, phone=phone)
-
-        buttons_config = [
-            [{'type': 'callback', 'text': '⚠️ Исправить ФИО', 'payload': CORRECT_FIO_CALLBACK}],
-            [{'type': 'callback', 'text': '⚠️ Исправить дату рождения', 'payload': CORRECT_BIRTH_DATE_CALLBACK}],
-            [{'type': 'callback', 'text': '⚠️ Исправить СНИЛС', 'payload': CORRECT_SNILS_CALLBACK}],
-            [{'type': 'callback', 'text': '⚠️ Исправить ОМС', 'payload': CORRECT_OMS_CALLBACK}],
-            [{'type': 'callback', 'text': '⚠️ Исправить пол', 'payload': CORRECT_GENDER_CALLBACK}],
-            [{'type': 'callback', 'text': '✅ Всё верно, подтвердить', 'payload': CONFIRM_DATA_CALLBACK}]
-        ]
+        log_data_event(str(chat_id), "confirmation_prepared", fio=fio, birth_date=birth_date, phone=phone, is_from_rms=is_from_rms)
+        
+        # Кнопки редактирования показываем только если данные НЕ из РМИС
+        buttons_config = []
+        
+        if not is_from_rms:
+            buttons_config.extend([
+                [{'type': 'callback', 'text': '⚠️ Исправить ФИО', 'payload': CORRECT_FIO_CALLBACK}],
+                [{'type': 'callback', 'text': '⚠️ Исправить дату рождения', 'payload': CORRECT_BIRTH_DATE_CALLBACK}],
+                [{'type': 'callback', 'text': '⚠️ Исправить СНИЛС', 'payload': CORRECT_SNILS_CALLBACK}],
+                [{'type': 'callback', 'text': '⚠️ Исправить ОМС', 'payload': CORRECT_OMS_CALLBACK}],
+                [{'type': 'callback', 'text': '⚠️ Исправить пол', 'payload': CORRECT_GENDER_CALLBACK}]
+            ])
+        else:
+            # Данные из РМИС - редактирование запрещено, но можно сообщить об ошибке
+            buttons_config.append([{'type': 'callback', 'text': '❌ Нашли ошибку?', 'payload': "reg_incorrect_data"}])
+            
+        buttons_config.append([{'type': 'callback', 'text': '✅ Всё верно, подтвердить', 'payload': CONFIRM_DATA_CALLBACK}])
 
         # Если есть список кандидатов, добавляем кнопку "Назад"
         if self.user_states.get(str(chat_id), {}).get('candidates'):
              buttons_config.append([{'type': 'callback', 'text': '🔙 Назад к выбору', 'payload': 'reg_back_to_list'}])
 
         keyboard = create_keyboard(buttons_config)
+        
+        edit_hint = "" if is_from_rms else "\nЕсли всё верно - нажмите 'Подтвердить', или выберите что нужно исправить:"
 
         await bot_instance.send_message(
             chat_id=chat_id,
-            text=f"📋 Пожалуйста, проверьте введенные данные:\n\n👤 ФИО: {fio}\n🎂 Дата рождения: {birth_date}\n📞 Телефон: {phone}\n💳 СНИЛС: {snils}\n🏥 ОМС: {oms}\n⚧ Пол: {gender}\n\nЕсли всё верно - нажмите 'Подтвердить', или выберите что нужно исправить:",
+            text=f"📋 Пожалуйста, проверьте личные данные:\n\n👤 ФИО: {fio}\n🎂 Дата рождения: {birth_date}\n📞 Телефон: {phone}\n💳 СНИЛС: {snils}\n🏥 ОМС: {oms}\n⚧ Пол: {gender}{edit_hint}",
             attachments=[keyboard] if keyboard else []
         )
 
@@ -352,6 +364,7 @@ class RegistrationHandler:
             user_data['birth_date'] = p['birth_date']
             user_data['snils'] = p['snils']
             user_data['oms'] = p['oms']
+            user_data['is_from_rms'] = True  # Флаг: данные из РМИС
 
             # Устанавливаем стейт (без candidates, т.к. выбор был безальтернативный)
             self.user_states[chat_id_str] = {'state': 'waiting_gender', 'data': user_data}
@@ -393,6 +406,7 @@ class RegistrationHandler:
         candidates = current_state.get('candidates', [])
 
         if selection_idx == 'manual':
+            user_data['is_from_rms'] = False
             await self.start_fio_request(bot_instance, chat_id, user_data)
             return
 
@@ -401,6 +415,7 @@ class RegistrationHandler:
             selected_patient = candidates[idx]
         except (ValueError, IndexError):
             await bot_instance.send_message(chat_id=chat_id, text="⚠ Ошибка выбора. Пробуем вручную.")
+            user_data['is_from_rms'] = False
             await self.start_fio_request(bot_instance, chat_id, user_data)
             return
 
@@ -409,6 +424,7 @@ class RegistrationHandler:
         user_data['birth_date'] = selected_patient['birth_date']
         user_data['snils'] = selected_patient['snils']
         user_data['oms'] = selected_patient['oms']
+        user_data['is_from_rms'] = True # Флаг: данные из РМИС
 
         self.user_states[chat_id_str] = {
             'state': 'waiting_gender',
@@ -672,9 +688,9 @@ class RegistrationHandler:
             await self.send_confirmation_message(bot_instance, chat_id, user_data)
         return success
 
-    async def _handle_gender_correction(self, chat_id_str: str, message_text: str, bot_instance: Bot, chat_id: int,
-                                        user_data: dict):
-        """Обработка исправления пола (текст)"""
-        # Если пользователь ввел текст вместо кнопки - просим нажать кнопку
-        await self.request_gender(bot_instance, chat_id, user_data)
-        return True
+    async def handle_incorrect_data_info(self, bot_instance: Bot, chat_id: int):
+        """Информирование пользователя о действиях при неверных данных из РМИС"""
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="ℹ️ Если вы заметили ошибку в своих данных, обратитесь в медицинскую организацию по месту прописки — там смогут внести корректные сведения в вашу медицинскую карту. Сейчас, для дальнейшей регистрации, вы можете нажать кнопку - <<Всё верно, продолжить>>"
+        )

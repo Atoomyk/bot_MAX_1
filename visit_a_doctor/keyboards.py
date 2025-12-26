@@ -175,26 +175,33 @@ def kb_gender_selection():
     ]
     return create_keyboard(buttons)
 
-def kb_confirm_patient_data(is_self_booking=False):
+def kb_confirm_patient_data(is_self_booking=False, allow_edit=True):
     """Подтверждение данных пациента
-    :param is_self_booking: Если True, скрываем кнопки редактирования ФИО и ДР
+    :param is_self_booking: Если True, скрываем кнопки редактирования ФИО и ДР (если allow_edit=True)
+    :param allow_edit: Если False, скрываем ВСЕ кнопки редактирования (данные из РМИС)
     """
     buttons = [
         [{'type': 'callback', 'text': '✅ Все верно, продолжить', 'payload': 'doc_confirm_patient_data'}],
     ]
     
-    # Показываем кнопки редактирования только если это не запись себя
-    if not is_self_booking:
+    if allow_edit:
+        # Показываем кнопки редактирования только если это не запись себя
+        if not is_self_booking:
+            buttons.extend([
+                [{'type': 'callback', 'text': '✏️ Изменить ФИО', 'payload': 'doc_edit_fio'}],
+                [{'type': 'callback', 'text': '✏️ Изменить Дату рождения', 'payload': 'doc_edit_birthdate'}],
+            ])
+        
+        # Кнопки для СНИЛС и ОМС показываем если можно редактировать
         buttons.extend([
-            [{'type': 'callback', 'text': '✏️ Изменить ФИО', 'payload': 'doc_edit_fio'}],
-            [{'type': 'callback', 'text': '✏️ Изменить Дату рождения', 'payload': 'doc_edit_birthdate'}],
+            [{'type': 'callback', 'text': '✏️ Изменить СНИЛС', 'payload': 'doc_edit_snils'}],
+            [{'type': 'callback', 'text': '✏️ Изменить Полис', 'payload': 'doc_edit_oms'}],
         ])
-    
-    # Кнопки для СНИЛС и ОМС показываем всегда
-    buttons.extend([
-        [{'type': 'callback', 'text': '✏️ Изменить СНИЛС', 'payload': 'doc_edit_snils'}],
-        [{'type': 'callback', 'text': '✏️ Изменить Полис', 'payload': 'doc_edit_oms'}],
-    ])
+    else:
+        # Данные из РМИС - редактирование запрещено, добавляем инфо-кнопку
+        buttons.extend([
+            [{'type': 'callback', 'text': '❌ Нашли ошибку?', 'payload': 'doc_incorrect_data'}]
+        ])
     
     return create_keyboard(buttons)
 

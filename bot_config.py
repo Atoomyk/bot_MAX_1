@@ -18,7 +18,7 @@ from logging_config import setup_logging, log_system_event
 # Настройка логирования ДО импорта других модулей
 setup_logging()
 
-from support_handler import init_support_handler
+from support_chat.support_handler import init_support_handler
 from registration_handler import RegistrationHandler
 from reminder_handler import ReminderHandler
 from sync_appointments.service import SyncService

@@ -9,11 +9,16 @@ from dataclasses import dataclass, asdict
 import time
 
 from dotenv import load_dotenv
-from maxapi.types import Attachment, OtherAttachmentPayload
+from maxapi.types import Attachment, OtherAttachmentPayload, CallbackButton, ButtonsPayload
 from maxapi.utils.inline_keyboard import AttachmentType
 
 # Импорт системы логирования
 from logging_config import log_user_event, log_system_event, log_security_event
+# Импорт утилит для клавиатур (предполагаем, что bot_utils доступен, так как он в корне)
+# Но лучше не импортировать bot_utils, чтобы избежать циклических зависимостей, 
+# если bot_handler будет импортировать support_handler.
+# Используем здесь прямую генерацию клавиатур или перенесем create_keyboard в отдельный модуль.
+# Пока используем maxapi напрямую.
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -305,13 +310,25 @@ class SupportHandler:
                 f"👤 ID: {user_id}\n"
                 f"👤 Имя: {user_data.get('fio', 'Неизвестно')}\n"
                 f"📞 Телефон: {user_data.get('phone', 'Не указан')}\n\n"
-                f"Для подключения отправьте:\n"
-                f"/chat {user_id}"
+                f"Для подключения нажмите на кнопку:"
+            )
+
+            # Создаем кнопку для начала диалога
+            buttons_payload = ButtonsPayload(buttons=[[
+                CallbackButton(
+                    text="Начать диалог",
+                    payload=f"start_chat:{user_id}"
+                )
+            ]])
+            keyboard = Attachment(
+                type=AttachmentType.INLINE_KEYBOARD,
+                payload=buttons_payload
             )
 
             await bot.send_message(
                 chat_id=self.admin_id,
-                text=message
+                text=message,
+                attachments=[keyboard]
             )
 
             log_system_event("support_chat", "admin_notified", user_id=user_id)
@@ -332,12 +349,20 @@ class SupportHandler:
                 return False
 
             # Проверяем, не занят ли уже админ
-            if self.admin_active_chat is not None:
+            if self.admin_active_chat is not None and self.admin_active_chat != user_id:
                 await bot.send_message(
                     chat_id=admin_id,
-                    text=f"❌ У вас уже есть активный чат с пользователем {self.admin_active_chat}.\n\nЗавершите его командой /end"
+                    text=f"❌ У вас уже есть активный чат с пользователем {self.admin_active_chat}.\n\nЗавершите его командой 0 или сообщением"
                 )
                 return False
+            
+            # Если админ уже в этом чате, просто говорим ему об этом (идемпотентность)
+            if self.admin_active_chat == user_id:
+                 await bot.send_message(
+                    chat_id=admin_id,
+                    text=f"👨‍⚕️ Вы уже в диалоге с этим пользователем."
+                )
+                 return True
 
             # Проверяем, существует ли чат
             if user_id not in self.active_chats:
@@ -347,14 +372,15 @@ class SupportHandler:
                 )
                 return False
 
-            # Проверяем, не подключен ли уже другой админ
+            # Проверяем, не подключен ли уже другой админ (или этот же)
             chat_info = self.active_chats[user_id]
             if not chat_info.get('waiting_for_admin', True):
-                await bot.send_message(
-                    chat_id=admin_id,
-                    text="❌ Этот чат уже обрабатывается другим оператором."
-                )
-                return False
+                 if chat_info.get('admin_id') != admin_id:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text="❌ Этот чат уже обрабатывается другим оператором."
+                    )
+                    return False
 
             # Подключаем админа
             self.admin_active_chat = user_id
@@ -369,7 +395,7 @@ class SupportHandler:
             # Отправляем подтверждение админу
             await bot.send_message(
                 chat_id=admin_id,
-                text=f"✅ Вы начали чат с пользователем {user_id}.\n\nВсе ваши текстовые сообщения будут пересылаться ему.\n\nДля завершения чата отправьте /end или цифру 0."
+                text=f"✅ Вы начал диалог с пользователем {user_id}.\n\nВсе ваши текстовые сообщения будут пересылаться ему.\n\nДля завершения чата отправьте цифру 0."
             )
             success_message_sent = True
 
@@ -426,7 +452,7 @@ class SupportHandler:
             chat_info['messages_queue'] = []
 
             log_user_event(str(user_id), "admin_connected", admin_id=admin_id)
-            log_security_event(str(admin_id), "chat_started", user_id=user_id)
+            log_security_event(str(admin_id), "chat_started", target_user_id=user_id)
 
             return True
         except Exception as e:
@@ -567,7 +593,7 @@ class SupportHandler:
                 return False
 
             # Проверяем команду выхода
-            if message_text and message_text.strip() in ["0", "/end"]:
+            if message_text and message_text.strip() == "0":
                 if self.admin_active_chat:
                     await self._end_chat(bot, self.admin_active_chat, "admin", "admin_exit")
                 else:
@@ -577,28 +603,19 @@ class SupportHandler:
                     )
                 return True
 
-            # Проверяем, есть ли активный чат
+            # Если админ не в чате, и это не "0", то просто игнорируем или (если раньше были команды /chat)
+            # В новой версии мы убираем /chat, оставляем только кнопки.
             if not self.admin_active_chat:
-                # Если админ отправляет /chat <user_id>
-                if message_text and message_text.startswith("/chat "):
-                    try:
-                        user_id_str = message_text.split()[1]
-                        user_id = int(user_id_str)
-                        result = await self.connect_admin_to_chat(bot, admin_id, user_id)
-                        return result
-                    except (ValueError, IndexError) as e:
-                        log_system_event("support_chat", "chat_command_parse_error", 
-                                       error=str(e), message=message_text, admin_id=admin_id)
-                        await bot.send_message(
-                            chat_id=admin_id,
-                            text="❌ Неверный формат команды. Используйте: /chat <user_id>"
-                        )
-                        return True
-                    except Exception as e:
-                        log_system_event("support_chat", "chat_command_error", 
-                                       error=str(e), message=message_text, admin_id=admin_id)
-                        # Не пробрасываем исключение дальше, возвращаем True чтобы остановить дальнейшую обработку
-                        return True
+                # Админ может общаться с ботом как обычный пользователь если он не в режиме поддержки,
+                # но здесь мы обрабатываем именно логику поддержки.
+                # Если админ пишет что-то, и он не в диалоге, это может быть команда другому обработчику.
+                # Вернем False, чтобы другие обработчики могли попробовать обработать сообщение
+                # (хотя в bot_handlers вызов process_admin_message стоит с return True при успехе).
+                
+                # Старая логика с /chat:
+                # if message_text and message_text.startswith("/chat "): ...
+                
+                # Мы её удаляем по требованию "нажать на кнопку".
                 return False
 
             user_id = self.admin_active_chat

@@ -499,6 +499,15 @@ async def message_callback(event: MessageCallback):
             return
 
         # Онлайн чат с поддержкой
+        elif payload.startswith("start_chat:"):
+            log_user_event(chat_id_str, "admin_start_chat_clicked")
+            try:
+                user_id_to_connect = int(payload.split(":")[1])
+                await support_handler.connect_admin_to_chat(event.bot, chat_id, user_id_to_connect)
+            except (ValueError, IndexError):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Ошибка в идентификаторе чата.")
+            return
+
         elif payload == "support_request":
             log_user_event(chat_id_str, "support_chat_requested")
             chat_id_str = str(chat_id)

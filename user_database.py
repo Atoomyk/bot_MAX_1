@@ -22,6 +22,7 @@ class UserDatabase:
         self._connect()
         self._init_db()
         self._create_reminders_table()  # ← создаём таблицу напоминаний
+        self._create_mvp_tables()       # ← создаём таблицы для MVP функционала (подписание, телемед, направления, записи)
 
     # ---------------------------------------------------------------------
     # Подключение
@@ -100,6 +101,144 @@ class UserDatabase:
             log_system_event("database", "reminders_table_initialized")
         except psycopg2.Error as e:
             log_system_event("database", "reminders_table_init_error", error=str(e))
+            self.conn.rollback()
+
+    # ---------------------------------------------------------------------
+    # Создание таблиц для MVP (подписание, телемед, направления, записи)
+    # ---------------------------------------------------------------------
+    def _create_mvp_tables(self):
+        """
+        Создаёт таблицы для новых функций MVP с запасом полей.
+        1. signing_requests (Подписание через Госключ/Госуслуги)
+        2. telemed_sessions (Телемедицина)
+        3. referrals (Направления)
+        4. appointments (История и будущие записи)
+        """
+        if not self.conn:
+            return
+
+        queries = [
+            # 1. Таблица для подписания документов
+            """
+            CREATE TABLE IF NOT EXISTS signing_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                request_type VARCHAR(50),       -- Тип запроса (contract, consent, etc.)
+                doc_title TEXT,                 -- Название документа
+                doc_url TEXT,                   -- Ссылка на документ
+                signing_method VARCHAR(50),     -- goskey / gosuslugi / simple_sms
+                status VARCHAR(50) DEFAULT 'pending', 
+                external_id VARCHAR(100),       -- ID во внешней системе
+                created_at TIMESTAMP DEFAULT NOW(),
+                signed_at TIMESTAMP,
+                
+                -- Поля с запасом (Reserve)
+                metadata TEXT,                  -- JSON строка для доп. данных
+                error_message TEXT,             -- Сообщение об ошибке, если сорвалось
+                ip_address VARCHAR(50),         -- IP пользователя
+                user_agent TEXT,                -- Устройство пользователя
+                
+                CONSTRAINT fk_signing_user 
+                    FOREIGN KEY (user_id) 
+                    REFERENCES users(user_id)
+            );
+            """,
+            
+            # 2. Таблица для телемедицинских консультаций
+            """
+            CREATE TABLE IF NOT EXISTS telemed_sessions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                doctor_name TEXT,
+                specialty TEXT,
+                scheduled_start TIMESTAMP,      -- Плановое начало
+                scheduled_end TIMESTAMP,        -- Плановое окончание
+                actual_start TIMESTAMP,         -- Фактическое начало
+                actual_end TIMESTAMP,           -- Фактическое окончание
+                conference_link TEXT,           -- Ссылка на видеочат
+                status VARCHAR(50),             -- scheduled, active, completed, canceled
+                platform VARCHAR(50),           -- zoom, jazz, trueconf, internal
+                
+                -- Поля с запасом
+                doctor_id VARCHAR(50),          -- Внешний ID врача
+                medical_report TEXT,            -- Заключение (кратко)
+                patient_complaints TEXT,        -- Жалобы
+                cost NUMERIC(10,2),             -- Стоимость, если платно
+                rating INT,                     -- Оценка от пациента
+                
+                CONSTRAINT fk_telemed_user 
+                    FOREIGN KEY (user_id) 
+                    REFERENCES users(user_id)
+            );
+            """,
+
+            # 3. Таблица направлений
+            """
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                referral_number VARCHAR(100),   -- Номер направления
+                from_doctor TEXT,               -- Кто направил
+                to_specialty TEXT,              -- К кому/куда
+                target_mo TEXT,                 -- Целевая МО
+                issue_date DATE,                -- Дата выдачи
+                expiry_date DATE,               -- Срок действия
+                status VARCHAR(50),             -- active, used, expired
+                
+                -- Поля с запасом
+                diagnosis_code VARCHAR(20),     -- МКБ-10
+                urgency VARCHAR(20),            -- cito / routine
+                referral_doc_url TEXT,          -- Скан направления
+                reason TEXT,                    -- Обоснование
+                
+                CONSTRAINT fk_referrals_user 
+                    FOREIGN KEY (user_id) 
+                    REFERENCES users(user_id)
+            );
+            """,
+
+            # 4. Таблица всех записей (История + Будущие)
+            # Поскольку таблица может существовать, мы проверим и добавим недостающие колонки отдельно
+            """
+            CREATE TABLE IF NOT EXISTS appointments (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                external_id VARCHAR(100) UNIQUE, -- ID записи в МИС
+                doctor_name TEXT,
+                specialty TEXT,
+                mo_name TEXT,
+                mo_address TEXT,
+                room_number VARCHAR(20),
+                start_time TIMESTAMP,
+                end_time TIMESTAMP
+            );
+            """
+        ]
+
+        try:
+            for q in queries:
+                self.cursor.execute(q)
+            self.conn.commit()
+            
+            # --- Миграция таблицы appointments (добавляем новые колонки, если их нет) ---
+            # Базовые поля, которые могли быть или нет:
+            self._add_column_if_not_exists("status", "VARCHAR(50)", "appointments")
+            self._add_column_if_not_exists("visit_type", "VARCHAR(50)", "appointments")
+            self._add_column_if_not_exists("reminder_sent", "BOOLEAN DEFAULT FALSE", "appointments")
+            
+            # Поля с запасом (Reserve)
+            self._add_column_if_not_exists("patient_note", "TEXT", "appointments")
+            self._add_column_if_not_exists("doctor_note", "TEXT", "appointments")
+            self._add_column_if_not_exists("referral_source", "TEXT", "appointments")
+            
+            # Убедимся, что есть constraint
+            # (сложно добавить IF NOT EXISTS для constraint в одном запросе, 
+            # поэтому просто ловим ошибку или игнорируем, если constraint уже есть. 
+            # В данном случае, оставим этот момент, предполагая, что базовая структура есть)
+
+            log_system_event("database", "mvp_tables_initialized")
+        except psycopg2.Error as e:
+            log_system_event("database", "mvp_tables_init_error", error=str(e))
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
@@ -208,18 +347,26 @@ class UserDatabase:
     # ---------------------------------------------------------------------
     # Остальной исходный код
     # ---------------------------------------------------------------------
-    def _add_column_if_not_exists(self, column_name: str, column_type: str):
+    # ---------------------------------------------------------------------
+    # Утилита для добавления колонок
+    # ---------------------------------------------------------------------
+    def _add_column_if_not_exists(self, column_name: str, column_type: str, table_name: str = "users"):
         try:
             check_column_query = """
             SELECT column_name 
             FROM information_schema.columns 
-            WHERE table_name='users' and column_name=%s;
+            WHERE table_name=%s and column_name=%s;
             """
-            self.cursor.execute(check_column_query, (column_name,))
+            self.cursor.execute(check_column_query, (table_name, column_name))
             if not self.cursor.fetchone():
-                add_column_query = f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"
+                add_column_query = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
                 self.cursor.execute(add_column_query)
-                log_system_event("database", "users_column_added", column=column_name)
+                self.conn.commit()  # Коммитим сразу
+                log_system_event("database", "column_added", column=column_name, table=table_name)
+        except psycopg2.Error as e:
+            log_system_event("database", "column_add_error", error=str(e), column=column_name, table=table_name)
+            if self.conn:
+                self.conn.rollback()
         except psycopg2.Error as e:
             log_system_event("database", "users_column_add_error", error=str(e), column=column_name)
             if self.conn:

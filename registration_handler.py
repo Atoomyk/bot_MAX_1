@@ -43,7 +43,7 @@ class RegistrationHandler:
         ]])
 
         import os
-        consent_file_path = os.path.join(os.getcwd(), "Soglasie.txt")
+        consent_file_path = os.path.join(os.getcwd(), "assets", "Soglasie.txt")
         
         attachments = []
         if os.path.exists(consent_file_path):

@@ -27,7 +27,7 @@ async def send_welcome_message(bot, chat_id):
 
     attachments = []
     import os
-    image_path = os.path.join(os.getcwd(), 'start_foto.png')
+    image_path = os.path.join(os.getcwd(), 'assets', 'start_foto.png')
     if os.path.exists(image_path):
         attachments.append(InputMedia(path=image_path))
     
@@ -480,6 +480,25 @@ async def message_callback(event: MessageCallback):
             greeting_name = await registration_handler.handle_data_confirmation(event.bot, user_id, chat_id)
             if greeting_name:
                 await send_main_menu(event.bot, chat_id, greeting_name)
+
+        elif payload == "get_user_manual":
+            log_user_event(user_id, "user_manual_requested")
+            import os
+            manual_path = os.path.join(os.getcwd(), 'assets', 'USER_MANUAL.md')
+            attachments = []
+            if os.path.exists(manual_path):
+                attachments.append(InputMedia(path=manual_path))
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="📖 Руководство пользователя:",
+                    attachments=attachments
+                )
+            else:
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Файл руководства не найден."
+                )
+            return
 
         # Обработка основных callback-ов
         elif payload == "other_options":

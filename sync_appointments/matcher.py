@@ -98,7 +98,7 @@ class Matcher:
                 # Если не удалось преобразовать, пробуем искать как есть
                 db_date_format = birth_date
 
-            query = "SELECT chat_id, fio, phone, birth_date FROM users WHERE birth_date = %s"
+            query = "SELECT user_id, fio, phone, birth_date FROM users WHERE birth_date = %s"
             self.db.cursor.execute(query, (db_date_format,))
             users = self.db.cursor.fetchall()
 
@@ -115,7 +115,7 @@ class Matcher:
         Сравнивает полное ФИО без учета порядка слов.
         """
         try:
-            query = "SELECT fio FROM users WHERE chat_id = %s"
+            query = "SELECT fio FROM users WHERE user_id = %s"
             self.db.cursor.execute(query, (chat_id,))
             result = self.db.cursor.fetchone()
 
@@ -150,7 +150,7 @@ class Matcher:
             True если хотя бы один номер совпадает
         """
         try:
-            query = "SELECT phone FROM users WHERE chat_id = %s"
+            query = "SELECT phone FROM users WHERE user_id = %s"
             self.db.cursor.execute(query, (chat_id,))
             result = self.db.cursor.fetchone()
 
@@ -263,7 +263,7 @@ class Matcher:
             True если пользователь существует
         """
         try:
-            query = "SELECT 1 FROM users WHERE chat_id = %s"
+            query = "SELECT 1 FROM users WHERE user_id = %s"
             self.db.cursor.execute(query, (chat_id,))
             return self.db.cursor.fetchone() is not None
         except Exception as e:

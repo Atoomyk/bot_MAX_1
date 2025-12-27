@@ -7,7 +7,7 @@ from typing import Optional
 
 @dataclass
 class UserContext:
-    chat_id: str
+    user_id: int
     step: str = "INIT"  # INIT, PERSON, MO, SPEC, DOCTOR, DATE, TIME, CONFIRM
     return_to_confirm: bool = False # Флаг режима редактирования
     

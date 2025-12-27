@@ -40,7 +40,7 @@ class SyncService:
         self.parser = Parser()
         self.matcher = Matcher(user_database)
         self.appointments_db = AppointmentsDatabase(user_database)
-        self.notifier = Notifier(bot_instance, self.appointments_db)
+        self.notifier = Notifier(bot_instance, self.appointments_db, user_database)
         self.cancel_service = CancelService()
 
         self.last_sync_time = None

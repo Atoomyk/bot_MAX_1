@@ -487,7 +487,7 @@ def _translate_security_event(event, **details):
 def log_user_event(user_id, action, **details):
     """Логирует действия пользователя"""
     translated_msg = _translate_user_event(action, **details)
-    logging.log(USER_LEVEL, f"[chat_id={user_id}] {translated_msg}")
+    logging.log(USER_LEVEL, f"[user_id={user_id}] {translated_msg}")
 
 
 def log_system_event(component, event, **details):
@@ -505,7 +505,7 @@ def log_data_event(user_id, operation, **details):
 def log_security_event(user_id, event, **details):
     """Логирует события безопасности"""
     translated_msg = _translate_security_event(event, **details)
-    logging.log(SECURITY_LEVEL, f"[chat_id={user_id}] {translated_msg}")
+    logging.log(SECURITY_LEVEL, f"[user_id={user_id}] {translated_msg}")
 
 
 def log_transport_event(method, endpoint, status, **details):

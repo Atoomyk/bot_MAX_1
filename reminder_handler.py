@@ -31,12 +31,12 @@ class ReminderHandler:
     # ---------------------------------------------------------------------
     # 📩 Показать меню управления напоминаниями
     # ---------------------------------------------------------------------
-    async def send_reminder_settings(self, bot, chat_id):
+    async def send_reminder_settings(self, bot, user_id, chat_id):
         """
         Показывает состояние уведомлений и кнопки:
         Да / Нет / Назад
         """
-        status = self.db.get_reminders_status(str(chat_id))
+        status = self.db.get_reminders_status(user_id)
         status_text = "ВКЛЮЧЕНЫ" if status else "ОТКЛЮЧЕНЫ"
 
         text = (
@@ -53,8 +53,8 @@ class ReminderHandler:
     # ---------------------------------------------------------------------
     # ✔ Кнопка "Да" — включение напоминаний
     # ---------------------------------------------------------------------
-    async def enable_reminders(self, bot, chat_id):
-        self.db.set_reminders_status(str(chat_id), True)
+    async def enable_reminders(self, bot, user_id, chat_id):
+        self.db.set_reminders_status(user_id, True)
 
         await bot.send_message(
             chat_id=chat_id,
@@ -67,8 +67,8 @@ class ReminderHandler:
     # ---------------------------------------------------------------------
     # ❌ Кнопка "Нет" — отключение напоминаний
     # ---------------------------------------------------------------------
-    async def disable_reminders(self, bot, chat_id):
-        self.db.set_reminders_status(str(chat_id), False)
+    async def disable_reminders(self, bot, user_id, chat_id):
+        self.db.set_reminders_status(user_id, False)
 
         await bot.send_message(
             chat_id=chat_id,
@@ -81,5 +81,5 @@ class ReminderHandler:
     # ---------------------------------------------------------------------
     # ↩ Кнопка "Назад"
     # ---------------------------------------------------------------------
-    async def go_back(self, bot, chat_id):
+    async def go_back(self, bot, user_id, chat_id):
         await self.send_other_options_menu(bot, chat_id)

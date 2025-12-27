@@ -40,7 +40,7 @@ class AppointmentsDatabase:
             create_table_query = """
             CREATE TABLE IF NOT EXISTS appointments (
                 id BIGSERIAL PRIMARY KEY,
-                user_id VARCHAR(255) NOT NULL,
+                user_id BIGINT NOT NULL,
                 appointment_json JSONB NOT NULL,
                 external_visit_time TIMESTAMP,
                 external_mo_name TEXT,
@@ -50,7 +50,7 @@ class AppointmentsDatabase:
 
                 CONSTRAINT fk_user
                     FOREIGN KEY (user_id) 
-                    REFERENCES users(chat_id)
+                    REFERENCES users(user_id)
                     ON DELETE CASCADE
             );
             """
@@ -102,12 +102,12 @@ class AppointmentsDatabase:
             if self.conn:
                 self.conn.rollback()
 
-    def appointment_exists(self, user_id: str, visit_time: datetime, mo_name: str) -> bool:
+    def appointment_exists(self, user_id: int, visit_time: datetime, mo_name: str) -> bool:
         """
         Проверяет, существует ли уже запись с такими же данными.
 
         Args:
-            user_id: ID пользователя (chat_id)
+            user_id: ID пользователя (int)
             visit_time: Дата и время приема
             mo_name: Название мед учреждения
 
@@ -129,13 +129,13 @@ class AppointmentsDatabase:
             logger.error(f"Ошибка проверки существования записи: {e}")
             return False
 
-    def add_appointment(self, user_id: str, appointment_data: Dict[str, Any],
+    def add_appointment(self, user_id: int, appointment_data: Dict[str, Any],
                         visit_time: datetime, mo_name: str) -> bool:
         """
         Добавляет новую запись к врачу.
 
         Args:
-            user_id: ID пользователя (chat_id)
+            user_id: ID пользователя (int)
             appointment_data: Данные о записи в формате словаря
             visit_time: Дата и время приема
             mo_name: Название мед учреждения
@@ -171,12 +171,12 @@ class AppointmentsDatabase:
                 self.conn.rollback()
             return False
 
-    def get_user_appointments(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_user_appointments(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Получает список записей пользователя.
 
         Args:
-            user_id: ID пользователя (chat_id)
+            user_id: ID пользователя (int)
             limit: Максимальное количество записей
 
         Returns:
@@ -215,7 +215,7 @@ class AppointmentsDatabase:
             logger.error(f"Ошибка получения записей пользователя {user_id}: {e}")
             return []
 
-    def get_appointment_by_id(self, appointment_id: int, user_id: str = None) -> Optional[Dict[str, Any]]:
+    def get_appointment_by_id(self, appointment_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
         """
         Получает запись по ID.
 
@@ -349,13 +349,13 @@ class AppointmentsDatabase:
             if self.conn:
                 self.conn.rollback()
 
-    def cancel_appointment(self, appointment_id: int, user_id: str) -> Dict[str, Any]:
+    def cancel_appointment(self, appointment_id: int, user_id: int) -> Dict[str, Any]:
         """
         Отменяет запись к врачу.
 
         Args:
             appointment_id: ID записи
-            user_id: ID пользователя (chat_id)
+            user_id: ID пользователя (int)
 
         Returns:
             Словарь с результатом:
@@ -441,7 +441,7 @@ class AppointmentsDatabase:
                 'error': f'Ошибка при отмене записи: {str(e)}'
             }
 
-    def get_appointment_by_id_with_status(self, appointment_id: int, user_id: str = None) -> Optional[Dict[str, Any]]:
+    def get_appointment_by_id_with_status(self, appointment_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
         """
         Получает запись по ID с информацией о статусе.
 

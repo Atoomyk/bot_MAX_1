@@ -41,25 +41,31 @@ def anti_duplicate(rate_limit=1.0):
             from bot_config import processed_events  # Ленивый импорт
             
             event = args[0] if args else None
-            chat_id = None
+            key_id = None
 
-            if hasattr(event, 'message') and hasattr(event.message, 'recipient'):
-                chat_id = str(event.message.recipient.chat_id)
-            elif hasattr(event, 'chat_id'):
-                chat_id = str(event.chat_id)
+            # Попытка извлечь user_id
+            if hasattr(event, 'from_user') and event.from_user and hasattr(event.from_user, 'user_id'):
+                key_id = int(event.from_user.user_id)
+            
+            # Если user_id нет, используем chat_id как идентификатор
+            if not key_id:
+                if hasattr(event, 'message') and hasattr(event.message, 'recipient'):
+                    key_id = int(event.message.recipient.chat_id)
+                elif hasattr(event, 'chat_id'):
+                    key_id = int(event.chat_id)
 
-            if not chat_id:
+            if not key_id:
                 return await func(*args, **kwargs)
 
             current_time = time.time()
-            if chat_id in processed_events:
-                last_time = processed_events[chat_id].get('last_time', 0)
+            if key_id in processed_events:
+                last_time = processed_events[key_id].get('last_time', 0)
                 if current_time - last_time < rate_limit:
                     return
 
-            if chat_id not in processed_events:
-                processed_events[chat_id] = {}
-            processed_events[chat_id]['last_time'] = current_time
+            if key_id not in processed_events:
+                processed_events[key_id] = {}
+            processed_events[key_id]['last_time'] = current_time
 
             return await func(*args, **kwargs)
         return wrapper
@@ -320,7 +326,8 @@ async def send_pending_notifications():
             if 'pending_notification' in chat_info:
                 notification = chat_info['pending_notification']
                 try:
-                    await bot.send_message(chat_id=user_id, text=notification)
+                    target_chat_id = chat_info.get('chat_id', user_id)
+                    await bot.send_message(chat_id=target_chat_id, text=notification)
                     del chat_info['pending_notification']
                 except Exception as e:
                     log_system_event("support_chat", "send_notification_error",

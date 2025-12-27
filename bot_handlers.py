@@ -45,32 +45,42 @@ async def send_welcome_message(bot, chat_id):
 @anti_duplicate()
 async def bot_started(event: BotStarted):
     """Обработка запуска бота"""
-    chat_id = event.chat_id
-    chat_id_str = str(chat_id)
+    chat_id = int(event.chat_id)
+    # Предполагаем, что user_id доступен через event.from_user.user_id, 
+    # если нет - используем chat_id как временное решение, но архитектурно нужен user_id
+    try:
+        user_id = int(event.from_user.user_id)
+    except AttributeError:
+        # Fallback если from_user недоступен в BotStarted (зависит от версии API)
+        user_id = chat_id
 
-    log_user_event(chat_id_str, "bot_started")
+    log_user_event(user_id, "bot_started")
 
     current_time = time.time()
-    last_bot_start = processed_events.get(chat_id_str, {}).get('last_bot_start', 0)
+    # Используем user_id для анти-спама
+    last_bot_start = processed_events.get(user_id, {}).get('last_bot_start', 0)
 
     if current_time - last_bot_start < 30:
-        log_user_event(chat_id_str, "bot_started_ignored_duplicate")
+        log_user_event(user_id, "bot_started_ignored_duplicate")
         return
 
-    if chat_id_str not in processed_events:
-        processed_events[chat_id_str] = {}
-    processed_events[chat_id_str]['last_bot_start'] = current_time
+    if user_id not in processed_events:
+        processed_events[user_id] = {}
+    processed_events[user_id]['last_bot_start'] = current_time
 
     try:
-        if db.is_user_registered(chat_id_str):
-            greeting_name = db.get_user_greeting(chat_id_str)
-            log_user_event(chat_id_str, "already_registered")
+        # Обновляем last_chat_id при старте
+        if db.is_user_registered(user_id):
+            db.update_last_chat_id(user_id, chat_id)
+            greeting_name = db.get_user_greeting(user_id)
+            log_user_event(user_id, "already_registered")
+            await send_main_menu(event.bot, chat_id, greeting_name) # Меню в чат
         else:
-            log_user_event(chat_id_str, "new_user_detected")
-            await send_welcome_message(event.bot, chat_id)
+            log_user_event(user_id, "new_user_detected")
+            await send_welcome_message(event.bot, chat_id) # Приветствие в чат
 
     except Exception as e:
-        log_system_event("bot_started", "message_send_failed", error=str(e), chat_id=chat_id_str)
+        log_system_event("bot_started", "message_send_failed", error=str(e), user_id=user_id)
 
 
 @dp.message_callback()
@@ -81,19 +91,29 @@ async def message_callback(event: MessageCallback):
         if len(processed_events) > 1000:
             cleanup_processed_events()
 
-        chat_id = event.message.recipient.chat_id
-        chat_id_str = str(chat_id)
+        chat_id = int(event.message.recipient.chat_id)
+        # Извлекаем user_id
+        try:
+             user_id = int(event.from_user.user_id)
+        except AttributeError:
+             # Fallback, хотя event.from_user должен быть
+             user_id = int(event.message.sender.user_id) if hasattr(event.message, 'sender') else chat_id
+        
+        # Обновляем последний чат
+        if db.is_user_registered(user_id):
+             db.update_last_chat_id(user_id, chat_id)
+
         payload = event.callback.payload
 
         # --- Visit Doctor Module ---
         if payload == 'start_visit_doctor':
-            log_user_event(chat_id_str, "visit_doctor_start")
-            await start_booking(event.bot, chat_id)
+            log_user_event(user_id, "visit_doctor_start")
+            await start_booking(event.bot, user_id, chat_id)
             return
             
         if payload.startswith('doc_'):
-            log_user_event(chat_id_str, "visit_doctor_action", payload=payload)
-            await handle_doctor_callback(event.bot, chat_id, payload)
+            log_user_event(user_id, "visit_doctor_action", payload=payload)
+            await handle_doctor_callback(event.bot, user_id, chat_id, payload)
             return
         # ---------------------------
 
@@ -104,16 +124,16 @@ async def message_callback(event: MessageCallback):
         if payload.startswith("view_appointment:"):
             try:
                 appointment_id = int(payload.split(":")[1])
-                log_user_event(chat_id_str, "appointment_details_viewed", appointment_id=appointment_id)
+                log_user_event(user_id, "appointment_details_viewed", appointment_id=appointment_id)
                 if sync_service and sync_service.notifier:
-                    await sync_service.notifier.send_appointment_details(chat_id, appointment_id)
+                    await sync_service.notifier.send_appointment_details(user_id, appointment_id)
                 else:
                     await event.bot.send_message(
                         chat_id=chat_id,
                         text="Сервис записей временно недоступен. Пожалуйста, попробуйте позже."
                     )
             except (ValueError, IndexError):
-                log_system_event("appointment_view_error", "invalid_appointment_id", payload=payload, chat_id=chat_id_str)
+                log_system_event("appointment_view_error", "invalid_appointment_id", payload=payload, user_id=user_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="Ошибка при обработке запроса. Пожалуйста, попробуйте еще раз."
@@ -121,9 +141,9 @@ async def message_callback(event: MessageCallback):
             return
 
         elif payload == "view_appointments_list":
-            log_user_event(chat_id_str, "appointments_list_viewed")
+            log_user_event(user_id, "appointments_list_viewed")
             if sync_service and sync_service.notifier:
-                await sync_service.notifier.send_appointments_list(chat_id)
+                await sync_service.notifier.send_appointments_list(user_id)
             else:
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -146,7 +166,7 @@ async def message_callback(event: MessageCallback):
             try:
                 appointment_id = int(payload.split(":")[1])
             except (ValueError, IndexError):
-                log_user_event(chat_id_str, "appointment_cancel_error", error="invalid_payload", payload=payload)
+                log_user_event(user_id, "appointment_cancel_error", error="invalid_payload", payload=payload)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Ошибка: некорректный идентификатор записи."
@@ -157,7 +177,7 @@ async def message_callback(event: MessageCallback):
             # Импортируем sync_service динамически, так как он может быть инициализирован позже
             from bot_config import sync_service as sync_service_check
             if not sync_service_check or not hasattr(sync_service_check, 'appointments_db') or not sync_service_check.appointments_db:
-                log_user_event(chat_id_str, "appointment_cancel_error", error="service_unavailable")
+                log_user_event(user_id, "appointment_cancel_error", error="service_unavailable")
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Сервис записей временно недоступен. Попробуйте позже."
@@ -168,11 +188,11 @@ async def message_callback(event: MessageCallback):
             sync_service = sync_service_check
             
             appointment = sync_service.appointments_db.get_appointment_by_id_with_status(
-                appointment_id, chat_id_str
+                appointment_id, user_id
             )
             
             if not appointment:
-                log_user_event(chat_id_str, "appointment_cancel_error", 
+                log_user_event(user_id, "appointment_cancel_error", 
                              error="not_found", appointment_id=appointment_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -181,7 +201,7 @@ async def message_callback(event: MessageCallback):
                 return
             
             if appointment['status'] == 'cancelled':
-                log_user_event(chat_id_str, "appointment_cancel_error", 
+                log_user_event(user_id, "appointment_cancel_error", 
                              error="already_cancelled", appointment_id=appointment_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -194,7 +214,7 @@ async def message_callback(event: MessageCallback):
                 from datetime import datetime, timedelta
                 time_diff = datetime.now() - appointment['created_at']
                 if time_diff.total_seconds() > 3 * 3600:
-                    log_user_event(chat_id_str, "appointment_cancel_error", 
+                    log_user_event(user_id, "appointment_cancel_error", 
                                  error="time_limit_exceeded", appointment_id=appointment_id)
                     await event.bot.send_message(
                         chat_id=chat_id,
@@ -203,7 +223,7 @@ async def message_callback(event: MessageCallback):
                     return
             
             # Показываем подтверждение
-            log_user_event(chat_id_str, "appointment_cancel_confirmation_shown", appointment_id=appointment_id)
+            log_user_event(user_id, "appointment_cancel_confirmation_shown", appointment_id=appointment_id)
             
             from maxapi.types import CallbackButton
             from maxapi.utils.inline_keyboard import ButtonsPayload, AttachmentType
@@ -242,7 +262,7 @@ async def message_callback(event: MessageCallback):
             try:
                 appointment_id = int(payload.split(":")[1])
             except (ValueError, IndexError):
-                log_user_event(chat_id_str, "appointment_cancel_error", error="invalid_confirm_payload", payload=payload)
+                log_user_event(user_id, "appointment_cancel_error", error="invalid_confirm_payload", payload=payload)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Ошибка: некорректный идентификатор записи."
@@ -252,7 +272,7 @@ async def message_callback(event: MessageCallback):
             # Импортируем sync_service динамически
             from bot_config import sync_service as sync_service_check
             if not sync_service_check or not hasattr(sync_service_check, 'appointments_db') or not sync_service_check.appointments_db:
-                log_user_event(chat_id_str, "appointment_cancel_error", error="service_unavailable")
+                log_user_event(user_id, "appointment_cancel_error", error="service_unavailable")
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Сервис записей временно недоступен. Попробуйте позже."
@@ -264,11 +284,11 @@ async def message_callback(event: MessageCallback):
             
             # Получаем данные записи, чтобы отправить SOAP-запрос отмены
             appointment_info = sync_service.appointments_db.get_appointment_by_id_with_status(
-                appointment_id, chat_id_str
+                appointment_id, user_id
             )
 
             if not appointment_info:
-                log_user_event(chat_id_str, "appointment_cancel_error",
+                log_user_event(user_id, "appointment_cancel_error",
                              error="not_found", appointment_id=appointment_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -277,7 +297,7 @@ async def message_callback(event: MessageCallback):
                 return
 
             if appointment_info.get('status') == 'cancelled':
-                log_user_event(chat_id_str, "appointment_cancel_error",
+                log_user_event(user_id, "appointment_cancel_error",
                              error="already_cancelled", appointment_id=appointment_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -290,7 +310,7 @@ async def message_callback(event: MessageCallback):
                 from datetime import datetime, timedelta
                 time_diff = datetime.now() - appointment_info['created_at']
                 if time_diff.total_seconds() > 3 * 3600:
-                    log_user_event(chat_id_str, "appointment_cancel_error",
+                    log_user_event(user_id, "appointment_cancel_error",
                                  error="time_limit_exceeded", appointment_id=appointment_id)
                     await event.bot.send_message(
                         chat_id=chat_id,
@@ -305,9 +325,9 @@ async def message_callback(event: MessageCallback):
             cancel_service = getattr(sync_service, 'cancel_service', None)
             if not cancel_service:
                 log_system_event("appointment", "cancel_failed",
-                               appointment_id=appointment_id,
-                               error="cancel_service_unavailable",
-                               chat_id=chat_id_str)
+                                appointment_id=appointment_id,
+                                error="cancel_service_unavailable",
+                                user_id=user_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Сервис отмены временно недоступен. Попробуйте позже."
@@ -321,13 +341,13 @@ async def message_callback(event: MessageCallback):
             )
 
             if not cancel_result.get('success'):
-                log_user_event(chat_id_str, "appointment_cancel_failed",
+                log_user_event(user_id, "appointment_cancel_failed",
                              error=cancel_result.get('error', 'soap_error'),
                              appointment_id=appointment_id)
                 log_system_event("appointment", "cancel_failed",
-                               appointment_id=appointment_id,
-                               error=cancel_result.get('error', cancel_result),
-                               chat_id=chat_id_str)
+                                appointment_id=appointment_id,
+                                error=cancel_result.get('error', cancel_result),
+                                user_id=user_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Не удалось отменить запись во внешней системе. Попробуйте позже."
@@ -338,7 +358,7 @@ async def message_callback(event: MessageCallback):
             response_text = cancel_result.get('response', '') or ''
             if "<Status_Code>SUCCESS</Status_Code>" not in response_text:
                 log_user_event(
-                    chat_id_str,
+                    user_id,
                     "appointment_cancel_failed",
                     error="external_status_not_success",
                     appointment_id=appointment_id,
@@ -348,7 +368,7 @@ async def message_callback(event: MessageCallback):
                     "appointment",
                     "cancel_failed_external_status",
                     appointment_id=appointment_id,
-                    chat_id=chat_id_str,
+                    user_id=user_id,
                     external_response=response_text[:500]
                 )
                 await event.bot.send_message(
@@ -358,23 +378,23 @@ async def message_callback(event: MessageCallback):
                 return
 
             # Если SOAP-запрос успешен — фиксируем отмену в БД
-            result = sync_service.appointments_db.cancel_appointment(appointment_id, chat_id_str)
+            result = sync_service.appointments_db.cancel_appointment(appointment_id, user_id)
             
             if result['success']:
-                log_user_event(chat_id_str, "appointment_cancelled", appointment_id=appointment_id)
+                log_user_event(user_id, "appointment_cancelled", appointment_id=appointment_id)
                 log_system_event("appointment", "cancelled", 
-                               appointment_id=appointment_id, chat_id=chat_id_str)
+                               appointment_id=appointment_id, chat_id=chat_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text="✅ Запись была отменена."
                 )
             else:
-                log_user_event(chat_id_str, "appointment_cancel_failed", 
+                log_user_event(user_id, "appointment_cancel_failed", 
                              error=result.get('error', 'unknown'), appointment_id=appointment_id)
                 log_system_event("appointment", "cancel_failed", 
                                appointment_id=appointment_id, 
                                error=result.get('error', 'unknown'),
-                               chat_id=chat_id_str)
+                               chat_id=chat_id)
                 await event.bot.send_message(
                     chat_id=chat_id,
                     text=f"❌ {result.get('error', 'Не удалось отменить запись.')}"
@@ -383,9 +403,9 @@ async def message_callback(event: MessageCallback):
         
         elif payload == "cancel_appointment_back":
             # Возврат в главное меню
-            log_user_event(chat_id_str, "appointment_cancel_cancelled")
-            if db.is_user_registered(chat_id_str):
-                greeting_name = db.get_user_greeting(chat_id_str)
+            log_user_event(user_id, "appointment_cancel_cancelled")
+            if db.is_user_registered(user_id):
+                greeting_name = db.get_user_greeting(user_id)
                 await send_main_menu(event.bot, chat_id, greeting_name)
             else:
                 await send_welcome_message(event.bot, chat_id)
@@ -393,88 +413,83 @@ async def message_callback(event: MessageCallback):
             return
 
         # Обработка админских callback для синхронизации
-        if sync_command_handler and chat_id == ADMIN_ID:
+        if sync_command_handler and chat_id == ADMIN_ID: # ADMIN_ID может быть использован как user_id или chat_id, тут не критично
             if payload.startswith("sync_"):
-                log_system_event("admin_callback", "sync_callback_received", payload=payload, chat_id=chat_id_str)
+                log_system_event("admin_callback", "sync_callback_received", payload=payload, user_id=user_id)
                 handled = await sync_command_handler.handle_callback(event, payload)
                 if handled:
-                    log_system_event("admin_callback", "sync_callback_handled", payload=payload, chat_id=chat_id_str)
+                    log_system_event("admin_callback", "sync_callback_handled", payload=payload, user_id=user_id)
                     return
 
         # Обработка callback-ов регистрации
         if payload == "start_continue":
-            log_user_event(chat_id_str, "registration_start_clicked")
-            await registration_handler.send_agreement_message(event.bot, chat_id)
+            log_user_event(user_id, "registration_start_clicked")
+            # ПЕРЕДАЕМ И user_id И chat_id
+            await registration_handler.send_agreement_message(event.bot, user_id, chat_id)
 
         elif payload == "agreement_accepted":
-            log_security_event(chat_id_str, "consent_accepted")
-            await registration_handler.start_registration_process(event.bot, chat_id)
+            log_security_event(user_id, "consent_accepted")
+            await registration_handler.start_registration_process(event.bot, user_id, chat_id)
 
         elif payload == "confirm_phone":
             # Логирование phone_confirmed происходит в handle_phone_confirmation
-            await registration_handler.handle_phone_confirmation(event.bot, chat_id_str, chat_id)
+            await registration_handler.handle_phone_confirmation(event.bot, user_id, chat_id)
 
         elif payload == "reject_phone":
             # Логирование phone_rejected происходит в handle_incorrect_phone
-            await registration_handler.handle_incorrect_phone(event.bot, chat_id)
+            await registration_handler.handle_incorrect_phone(event.bot, user_id, chat_id)
 
         elif payload == "correct_fio":
-            log_user_event(chat_id_str, "fio_correction_requested")
-            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'fio')
+            log_user_event(user_id, "fio_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, user_id, chat_id, 'fio')
 
         elif payload == "correct_birth_date":
-            log_user_event(chat_id_str, "birth_date_correction_requested")
-            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'birth_date')
+            log_user_event(user_id, "birth_date_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, user_id, chat_id, 'birth_date')
 
         elif payload == "correct_snils":
-            log_user_event(chat_id_str, "snils_correction_requested")
-            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'snils')
+            log_user_event(user_id, "snils_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, user_id, chat_id, 'snils')
 
         elif payload == "correct_oms":
-            log_user_event(chat_id_str, "oms_correction_requested")
-            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'oms')
+            log_user_event(user_id, "oms_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, user_id, chat_id, 'oms')
 
         elif payload == "correct_gender":
-            log_user_event(chat_id_str, "gender_correction_requested")
-            # Для пола отдельный обработчик, так как там кнопки, а не текст
-             # Но handle_data_correction вызывает request_data_correction, которая отправляет сообщение.
-             # Я настроил config['gender'] в registration_handler.py.
-             # Но там 'message'.
-             # Лучше тут вызвать request_gender напрямую.
-             # Но регистрация ожидает handle_data_correction чтобы очистить старое значение.
-            await registration_handler.handle_data_correction(event.bot, chat_id_str, chat_id, 'gender')
+            log_user_event(user_id, "gender_correction_requested")
+            await registration_handler.handle_data_correction(event.bot, user_id, chat_id, 'gender')
 
         elif payload == "gender_male":
-            await registration_handler.handle_gender_choice(event.bot, chat_id_str, chat_id, "Мужской")
+            await registration_handler.handle_gender_choice(event.bot, user_id, chat_id, "Мужской")
 
         elif payload == "gender_female":
-            await registration_handler.handle_gender_choice(event.bot, chat_id_str, chat_id, "Женский")
+            await registration_handler.handle_gender_choice(event.bot, user_id, chat_id, "Женский")
 
         elif payload == "reg_incorrect_data":
              await registration_handler.handle_incorrect_data_info(event.bot, chat_id)
 
         elif payload.startswith("reg_identity_"):
             selection = payload.replace("reg_identity_", "")
-            await registration_handler.handle_identity_selection(event.bot, chat_id_str, chat_id, selection)
+            await registration_handler.handle_identity_selection(event.bot, user_id, chat_id, selection)
 
         elif payload == "reg_back_to_list":
-            await registration_handler.handle_back_to_list(event.bot, chat_id_str, chat_id)
+            await registration_handler.handle_back_to_list(event.bot, user_id, chat_id)
 
         elif payload == "confirm_data":
-            log_user_event(chat_id_str, "registration_data_confirmed")
-            greeting_name = await registration_handler.handle_data_confirmation(event.bot, chat_id_str, chat_id)
+            log_user_event(user_id, "registration_data_confirmed")
+            greeting_name = await registration_handler.handle_data_confirmation(event.bot, user_id, chat_id)
             if greeting_name:
                 await send_main_menu(event.bot, chat_id, greeting_name)
 
         # Обработка основных callback-ов
         elif payload == "other_options":
-            log_user_event(chat_id_str, "other_options_menu_opened")
+            log_user_event(user_id, "other_options_menu_opened")
             await send_other_options_menu(event.bot, chat_id)
 
         elif payload == "back_to_main":
-            log_user_event(chat_id_str, "back_to_main_menu")
-            if db.is_user_registered(chat_id_str):
-                greeting_name = db.get_user_greeting(chat_id_str)
+            log_user_event(user_id, "back_to_main_menu")
+            if db.is_user_registered(user_id):
+                greeting_name = db.get_user_greeting(user_id)
                 await send_main_menu(event.bot, chat_id, greeting_name)
             else:
                 await send_welcome_message(event.bot, chat_id)
@@ -482,50 +497,49 @@ async def message_callback(event: MessageCallback):
 
         # Управление напоминаниями
         elif payload == "reminders_settings":
-            log_user_event(chat_id_str, "reminders_settings_opened")
-            await reminder_handler.send_reminder_settings(event.bot, chat_id)
+            log_user_event(user_id, "reminders_settings_opened")
+            await reminder_handler.send_reminder_settings(event.bot, user_id, chat_id)
             return
 
         elif payload == "reminders_yes":
-            log_user_event(chat_id_str, "reminders_enabled")
-            await reminder_handler.enable_reminders(event.bot, chat_id)
+            log_user_event(user_id, "reminders_enabled")
+            await reminder_handler.enable_reminders(event.bot, user_id, chat_id)
             return
 
         elif payload == "reminders_no":
-            log_user_event(chat_id_str, "reminders_disabled")
-            await reminder_handler.disable_reminders(event.bot, chat_id)
+            log_user_event(user_id, "reminders_disabled")
+            await reminder_handler.disable_reminders(event.bot, user_id, chat_id)
             return
 
         elif payload == "reminders_back":
-            log_user_event(chat_id_str, "reminders_back_clicked")
-            await reminder_handler.go_back(event.bot, chat_id)
+            log_user_event(user_id, "reminders_back_clicked")
+            await reminder_handler.go_back(event.bot, user_id, chat_id)
             return
 
         # Онлайн чат с поддержкой
         elif payload.startswith("start_chat:"):
-            log_user_event(chat_id_str, "admin_start_chat_clicked")
+            log_user_event(user_id, "admin_start_chat_clicked")
             try:
                 user_id_to_connect = int(payload.split(":")[1])
-                await support_handler.connect_admin_to_chat(event.bot, chat_id, user_id_to_connect)
+                await support_handler.connect_admin_to_chat(event.bot, user_id, user_id_to_connect, admin_chat_id=chat_id)
             except (ValueError, IndexError):
                 await event.bot.send_message(chat_id=chat_id, text="❌ Ошибка в идентификаторе чата.")
             return
 
         elif payload == "support_request":
-            log_user_event(chat_id_str, "support_chat_requested")
-            chat_id_str = str(chat_id)
-            if db.is_user_registered(chat_id_str):
-                greeting_name = db.get_user_greeting(chat_id_str)
+            log_user_event(user_id, "support_chat_requested")
+            if db.is_user_registered(user_id):
+                greeting_name = db.get_user_greeting(user_id)
                 user_phone = ""
 
                 try:
                     if hasattr(db, 'get_user_phone'):
-                        user_phone = db.get_user_phone(chat_id_str)
+                        user_phone = db.get_user_phone(user_id)
                     else:
-                        user_data = db.get_user_data(chat_id_str)
+                        user_data = db.get_user_data(user_id)
                         user_phone = user_data.get('phone', '') if user_data else ''
                 except Exception as phone_error:
-                    log_system_event("phone_retrieval_error", str(phone_error), chat_id=chat_id_str)
+                    log_system_event("phone_retrieval_error", str(phone_error), user_id=user_id)
                     user_phone = "Не указан"
 
                 user_data = {
@@ -533,7 +547,7 @@ async def message_callback(event: MessageCallback):
                     'phone': user_phone
                 }
 
-                await support_handler.handle_support_request(event.bot, chat_id, user_data)
+                await support_handler.handle_support_request(event.bot, user_id, chat_id, user_data)
             else:
                 keyboard = create_keyboard([[
                     {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
@@ -565,10 +579,19 @@ async def handle_message(event: MessageCreated):
         if len(processed_events) > 1000:
             cleanup_processed_events()
 
-        chat_id = event.message.recipient.chat_id
-        chat_id_str = str(chat_id)
+        chat_id = int(event.message.recipient.chat_id)
+        # Извлекаем user_id
+        try:
+             user_id = int(event.from_user.user_id)
+        except AttributeError:
+             # Fallback
+             user_id = int(event.message.sender.user_id) if hasattr(event.message, 'sender') else chat_id
 
-        is_admin = (chat_id == ADMIN_ID) if ADMIN_ID else False
+        # Обновляем последний чат
+        if db.is_user_registered(user_id):
+             db.update_last_chat_id(user_id, chat_id)
+
+        is_admin = (user_id == ADMIN_ID or chat_id == ADMIN_ID) if ADMIN_ID else False
 
         if not event.message.body:
             return
@@ -577,18 +600,19 @@ async def handle_message(event: MessageCreated):
         # Проверяем, находится ли пользователь в сценарии записи к врачу
         if event.message.body.text:
             try:
-                ctx = await get_or_create_context(chat_id_str)
+                # Используем user_id для контекста
+                ctx = await get_or_create_context(user_id)
                 if ctx.step != "INIT":
                     text_val = event.message.body.text
                     if text_val.lower() in ['/start', 'отмена', 'стоп', 'выйти']:
                         ctx.step = "INIT"
                         # Проваливаемся дальше, чтобы показать главное меню
                     else:
-                        log_user_event(chat_id_str, "visit_doctor_text_input")
-                        await handle_doctor_text(event.bot, chat_id, text_val)
+                        log_user_event(user_id, "visit_doctor_text_input")
+                        await handle_doctor_text(event.bot, user_id, chat_id, text_val)
                         return
             except Exception as e:
-                log_system_event("visit_doctor_module", "context_error", error=str(e))
+                log_system_event("visit_doctor_module", "context_error", error=str(e), user_id=user_id)
         # ---------------------------
 
         # Получаем attachments из сообщения
@@ -610,7 +634,7 @@ async def handle_message(event: MessageCreated):
             
             # Обрабатываем только команды синхронизации (если есть текст)
             if message_text and message_text.startswith("/admin_"):
-                log_system_event("admin_command", "command_received", command=message_text, chat_id=chat_id_str)
+                log_system_event("admin_command", "command_received", command=message_text, user_id=user_id)
                 
                 # Импортируем sync_command_handler динамически, так как он может быть инициализирован позже
                 from bot_config import sync_command_handler
@@ -618,24 +642,27 @@ async def handle_message(event: MessageCreated):
                 if sync_command_handler:
                     handled = await sync_command_handler.handle_message(event)
                     if handled:
-                        log_system_event("admin_command", "command_handled", command=message_text, chat_id=chat_id_str)
+                        log_system_event("admin_command", "command_handled", command=message_text, user_id=user_id)
                         return
                 else:
-                    log_system_event("admin_command", "sync_handler_not_available", command=message_text, chat_id=chat_id_str)
+                    log_system_event("admin_command", "sync_handler_not_available", command=message_text, user_id=user_id)
 
             # Обработка сообщений администратора через support_handler (включая изображения)
             # Обрабатываем если есть текст или изображение
             if message_text or has_image:
+                # Админ отправляет сообщение в поддержку (возможно как ответ)
+                # Тут надо проверить логику support_handler.process_admin_message
                 processed = await support_handler.process_admin_message(
-                    event.bot, chat_id, message_text, attachments
+                    event.bot, user_id, message_text, attachments
                 )
                 if processed:
-                    log_system_event("admin_command", "handled_by_support", command=message_text or "[изображение]", chat_id=chat_id_str)
+                    log_system_event("admin_command", "handled_by_support", command=message_text or "[изображение]", user_id=user_id)
                     return
 
         if event.message.body.attachments:
+            # Обработка контакта при регистрации
             contact_processed = await registration_handler.process_contact_message(
-                event, chat_id_str, chat_id
+                event, user_id, chat_id
             )
             if contact_processed:
                 return
@@ -650,21 +677,21 @@ async def handle_message(event: MessageCreated):
         if not message_text and not has_image:
             return
 
-        # Логируем сообщения пользователей (но не команды админа, они уже залогированы выше)
-        is_admin_msg = (chat_id == ADMIN_ID) if ADMIN_ID else False
+        # Логируем сообщения пользователей
+        is_admin_msg = (user_id == ADMIN_ID) if ADMIN_ID else False
         if not (is_admin_msg and message_text and message_text.startswith("/")):
-            log_user_event(chat_id_str, "message_sent", text=message_text or "[изображение]")
+            log_user_event(user_id, "message_sent", text=message_text or "[изображение]")
 
-        if not db.is_user_registered(chat_id_str) and chat_id_str not in user_states:
-            log_user_event(chat_id_str, "message_ignored_unregistered")
+        if not db.is_user_registered(user_id) and str(user_id) not in user_states and user_id not in user_states:
+            # Проверка user_states на int и str ключи пока рефакторинг идет
+            log_user_event(user_id, "message_ignored_unregistered")
             await send_welcome_message(event.bot, chat_id)
-
             return
 
-        # Обработка регистрации только если есть текст (не обрабатываем только изображения)
+        # Обработка регистрации только если есть текст
         if message_text:
             registration_processed = await registration_handler.process_text_input(
-                chat_id_str, message_text, event.bot, chat_id
+                user_id, message_text, event.bot, chat_id
             )
 
             if registration_processed:
@@ -672,30 +699,30 @@ async def handle_message(event: MessageCreated):
 
         # Обработка сообщений в чате поддержки (включая изображения)
         chat_processed = await support_handler.process_user_message(
-            event.bot, chat_id, message_text, attachments
+            event.bot, user_id, message_text, attachments
         )
         if chat_processed:
             return
 
-        if db.is_user_registered(chat_id_str):
-            greeting_name = db.get_user_greeting(chat_id_str)
+        if db.is_user_registered(user_id):
+            greeting_name = db.get_user_greeting(user_id)
             await send_main_menu(event.bot, chat_id, greeting_name)
             return
 
-        if not user_states.get(chat_id_str):
-            await send_welcome_message(event.bot, chat_id)
-
+        # Проверка состояния пользователя (int)
+        if not user_states.get(user_id) and not user_states.get(str(user_id)):
+             await send_welcome_message(event.bot, chat_id)
 
     except Exception as e:
-        chat_id_str = str(event.message.recipient.chat_id) if hasattr(event, 'message') and hasattr(event.message, 'recipient') else 'unknown'
-        log_system_event("message_handler_error", str(e), chat_id=chat_id_str)
-        user_states.pop(chat_id_str, None)
-
+        chat_id_recip = event.message.recipient.chat_id if hasattr(event, 'message') and hasattr(event.message, 'recipient') else 'unknown'
+        log_system_event("message_handler_error", str(e), chat_id=str(chat_id_recip))
+        # Очистка состояния при ошибке
+        user_states.pop(user_id, None) if 'user_id' in locals() else None
+        
         try:
             await event.bot.send_message(
                 chat_id=event.message.recipient.chat_id,
                 text="Произошла ошибка при обработке сообщения. Пожалуйста, попробуйте еще раз."
             )
         except Exception as send_error:
-            log_system_event("message_error_send_failed", str(send_error), chat_id=chat_id_str)
-
+            log_system_event("message_error_send_failed", str(send_error), chat_id=str(chat_id_recip))

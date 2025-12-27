@@ -32,12 +32,13 @@ class SyncCommandHandler:
         Обрабатывает сообщение, проверяя админские команды.
         """
         try:
-            # Используем chat_id из recipient
+            # Используем chat_id для ответов, но user_id для проверки прав
             chat_id = event.message.recipient.chat_id
+            user_id = int(event.from_user.user_id) if hasattr(event, 'from_user') and hasattr(event.from_user, 'user_id') else None
 
-            # Проверяем, что это сообщение от администратора (по chat_id)
-            if chat_id != self.admin_id:
-                log_system_event("admin_command", "non_admin_attempt", chat_id=str(chat_id), admin_id=str(self.admin_id))
+            # Проверяем, что это сообщение от администратора (по user_id)
+            if user_id != self.admin_id:
+                log_system_event("admin_command", "non_admin_attempt", chat_id=str(chat_id), admin_id=str(self.admin_id), user_id=str(user_id))
                 return False
 
             # Проверяем наличие текста сообщения
@@ -358,9 +359,10 @@ class SyncCommandHandler:
         """
         try:
             chat_id = event.message.recipient.chat_id
+            user_id = int(event.from_user.user_id) if hasattr(event, 'from_user') and hasattr(event.from_user, 'user_id') else None
 
             # Пропускаем, если не от администратора
-            if chat_id != self.admin_id:
+            if user_id != self.admin_id:
                 return False
 
             # Обработка callback-ов администратора для управления синхронизацией

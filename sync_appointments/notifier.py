@@ -21,16 +21,18 @@ class Notifier:
     Класс для отправки уведомлений пользователям.
     """
 
-    def __init__(self, bot_instance, appointments_db):
+    def __init__(self, bot_instance, appointments_db, user_database):
         """
         Инициализация notifier.
 
         Args:
             bot_instance: Экземпляр бота MAX API
             appointments_db: Экземпляр базы данных записей
+            user_database: Экземпляр базы данных пользователей
         """
         self.bot = bot_instance
         self.appointments_db = appointments_db
+        self.user_db = user_database
         self.sent_count = 0
         self.skipped_count = 0
         self.error_count = 0
@@ -63,12 +65,19 @@ class Notifier:
                 self.error_count += 1
                 return False
 
+            # Получаем chat_id для отправки (адрес доставки)
+            chat_id = self.user_db.get_last_chat_id(user_id)
+            if not chat_id:
+                logger.warning(f"Не найден chat_id для пользователя {user_id}, уведомление не может быть отправлено")
+                self.error_count += 1
+                return False
+
             # Создаем клавиатуру только с кнопкой отмены (если есть ID записи)
             keyboard = self._create_notification_keyboard(appointments)
 
             # Отправляем сообщение
             await self.bot.send_message(
-                chat_id=user_id,
+                chat_id=chat_id,
                 text=message,
                 attachments=[keyboard] if keyboard else []
             )

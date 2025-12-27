@@ -19,20 +19,20 @@ user_states = {}
 # В реальном проде можно кешировать на уровне UserContext или Redis
 session_cache = {} # chat_id -> {'mos': [], 'specs': [], 'doctors': [], 'slots': []}
 
-async def get_or_create_context(chat_id: str) -> UserContext:
-    if chat_id not in user_states:
-        user_states[chat_id] = UserContext(chat_id=chat_id)
-    return user_states[chat_id]
+async def get_or_create_context(user_id: int) -> UserContext:
+    if user_id not in user_states:
+        user_states[user_id] = UserContext(user_id=user_id)
+    return user_states[user_id]
 
-def get_cache(chat_id):
-    if chat_id not in session_cache:
-        session_cache[chat_id] = {}
-    return session_cache[chat_id]
+def get_cache(user_id: int):
+    if user_id not in session_cache:
+        session_cache[user_id] = {}
+    return session_cache[user_id]
 
-async def show_patient_confirmation(bot, chat_id, ctx):
+async def show_patient_confirmation(bot, user_id, chat_id, ctx):
     """Показывает экран подтверждения данных пациента"""
     # Ensure we have the latest context
-    ctx = await get_or_create_context(str(chat_id))
+    ctx = await get_or_create_context(user_id)
     ctx.step = "CONFIRM_PATIENT_DATA"
     ctx.return_to_confirm = False 
     
@@ -54,11 +54,11 @@ async def show_patient_confirmation(bot, chat_id, ctx):
         attachments=[kb.kb_confirm_patient_data(is_self_booking=is_self_booking, allow_edit=not is_from_rms)]
     )
 
-async def start_booking(bot, chat_id):
+async def start_booking(bot, user_id, chat_id):
     """Запуск сценария"""
-    ctx = UserContext(chat_id=str(chat_id))
-    user_states[str(chat_id)] = ctx
-    session_cache.pop(str(chat_id), None) # Очистка кэша
+    ctx = UserContext(user_id=user_id)
+    user_states[user_id] = ctx
+    session_cache.pop(user_id, None) # Очистка кэша
     
     ctx.step = "PERSON"
     await bot.send_message(
@@ -108,7 +108,7 @@ async def send_mo_selection_menu(bot, chat_id, mos, ctx):
         attachments=[kb.kb_mo_selection(mos)]
     )
 
-async def process_mo_selection(bot, chat_id, ctx):
+async def process_mo_selection(bot, user_id, chat_id, ctx):
     """(Helper) Загружает и показывает список МО"""
     xml = await SoapClient.get_mos(ctx.session_id)
     mos = SoapResponseParser.parse_mo_list(xml)
@@ -118,16 +118,16 @@ async def process_mo_selection(bot, chat_id, ctx):
         return
 
     # Кэшируем
-    get_cache(chat_id)['mos'] = mos
+    get_cache(user_id)['mos'] = mos
     
     await send_mo_selection_menu(bot, chat_id, mos, ctx)
 
-async def handle_callback(bot, chat_id, payload):
-    ctx = await get_or_create_context(str(chat_id))
-    cache = get_cache(chat_id)
+async def handle_callback(bot, user_id, chat_id, payload):
+    ctx = await get_or_create_context(user_id)
+    cache = get_cache(user_id)
     
     if payload == 'doc_restart':
-        await start_booking(bot, chat_id)
+        await start_booking(bot, user_id, chat_id)
         return
 
     # --- НАВИГАЦИЯ НАЗАД ---
@@ -138,7 +138,7 @@ async def handle_callback(bot, chat_id, payload):
     elif payload == 'doc_back_to_mo':
         mos = cache.get('mos', [])
         if not mos: # Ре-фетч если кэш пропал
-             await process_mo_selection(bot, chat_id, ctx)
+             await process_mo_selection(bot, user_id, chat_id, ctx)
              return
         await send_mo_selection_menu(bot, chat_id, mos, ctx)
         return
@@ -242,7 +242,7 @@ async def handle_callback(bot, chat_id, payload):
              return
         
         ctx.session_id = session_id
-        await process_mo_selection(bot, chat_id, ctx)
+        await process_mo_selection(bot, user_id, chat_id, ctx)
         return
 
     if payload.startswith('doc_person_'):
@@ -254,7 +254,7 @@ async def handle_callback(bot, chat_id, payload):
         
         if selection == 'other':
             # ⚡ ЗАПРОС К API ПАЦИЕНТОВ ПО ТЕЛЕФОНУ ВЛАДЕЛЬЦА ⚡
-            user_data = db.get_user_full_data(str(chat_id))
+            user_data = db.get_user_full_data(user_id)
             phone = user_data.get('phone', '') if user_data else ''
 
             if phone:
@@ -290,7 +290,7 @@ async def handle_callback(bot, chat_id, payload):
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.\n\nПример: **Иванов Иван Иванович**")
         else:
             # Запись себя: берем данные из БД
-            user_data = db.get_user_full_data(str(chat_id))
+            user_data = db.get_user_full_data(user_id)
             if user_data:
                 # Начинаем с False
                 ctx.is_from_rms = False
@@ -336,7 +336,7 @@ async def handle_callback(bot, chat_id, payload):
                         
                         if need_update:
                             db.update_user_data(
-                                str(chat_id),
+                                user_id,
                                 matched_patient['fio'],
                                 matched_patient['birth_date'],
                                 matched_patient.get('snils'),
@@ -373,7 +373,7 @@ async def handle_callback(bot, chat_id, payload):
                     await bot.send_message(chat_id=chat_id, text="Введите номер полиса ОМС.")
                 else:
                     # Все есть, переходим к подтверждению
-                    await show_patient_confirmation(bot, chat_id, ctx)
+                    await show_patient_confirmation(bot, user_id, chat_id, ctx)
             else:
                  await bot.send_message(chat_id=chat_id, text="❌ Ошибка: не удалось получить данные профиля. Попробуйте записать 'другого человека'.")
                  return
@@ -419,14 +419,14 @@ async def handle_callback(bot, chat_id, payload):
         ctx.patient_gender = "Мужской" if payload == 'doc_gender_male' else "Женский"
         
         if getattr(ctx, 'return_to_confirm', False):
-            await show_patient_confirmation(bot, chat_id, ctx)
+            await show_patient_confirmation(bot, user_id, chat_id, ctx)
             return True
 
         # Если СНИЛС уже есть (из РМИС), переходим к следующему шагу
         if getattr(ctx, 'patient_snils', None):
             if getattr(ctx, 'patient_oms', None):
                 # И полис есть - сразу к подтверждению
-                await show_patient_confirmation(bot, chat_id, ctx)
+                await show_patient_confirmation(bot, user_id, chat_id, ctx)
             else:
                 # Полиса нет - просим полис
                 ctx.step = "ENTER_OMS"
@@ -663,16 +663,16 @@ async def handle_callback(bot, chat_id, payload):
         else:
             await bot.send_message(chat_id=chat_id, text="❌ Ошибка при создании записи. Возможно слот уже занят.", attachments=[kb.kb_final_menu()])
             
-        if str(chat_id) in user_states:
-             del user_states[str(chat_id)]
+        if user_id in user_states:
+             del user_states[user_id]
         return
         
 
 # visit_a_doctor/handlers_text_input.py
 from visit_a_doctor.handlers import get_or_create_context, show_patient_confirmation
-async def handle_text_input(bot, chat_id, text):
+async def handle_text_input(bot, user_id, chat_id, text):
     """Обработка текстового ввода для модуля записи к врачу"""
-    ctx = await get_or_create_context(str(chat_id))
+    ctx = await get_or_create_context(user_id)
     is_self_booking = getattr(ctx, 'selected_person', '') == 'me'
 
     # ------------------ ФИО ------------------
@@ -689,7 +689,7 @@ async def handle_text_input(bot, chat_id, text):
 
         ctx.patient_fio = text
         if getattr(ctx, 'return_to_confirm', False):
-            await show_patient_confirmation(bot, chat_id, ctx)
+            await show_patient_confirmation(bot, user_id, chat_id, ctx)
             return True
 
         ctx.step = "ENTER_BIRTHDATE"
@@ -710,7 +710,7 @@ async def handle_text_input(bot, chat_id, text):
 
         ctx.patient_birthdate = text
         if getattr(ctx, 'return_to_confirm', False):
-            await show_patient_confirmation(bot, chat_id, ctx)
+            await show_patient_confirmation(bot, user_id, chat_id, ctx)
             return True
 
         ctx.step = "ENTER_GENDER"
@@ -734,7 +734,7 @@ async def handle_text_input(bot, chat_id, text):
              # СНИЛС есть, проверяем ОМС
              if getattr(ctx, 'patient_oms', None):
                  # Все есть
-                 await show_patient_confirmation(bot, chat_id, ctx)
+                 await show_patient_confirmation(bot, user_id, chat_id, ctx)
                  return True
              else:
                  ctx.step = "ENTER_OMS"
@@ -756,13 +756,13 @@ async def handle_text_input(bot, chat_id, text):
 
         ctx.patient_snils = snils
         if getattr(ctx, 'return_to_confirm', False):
-            await show_patient_confirmation(bot, chat_id, ctx)
+            await show_patient_confirmation(bot, user_id, chat_id, ctx)
             return True
 
         # После ввода СНИЛС проверяем ОМС
         if getattr(ctx, 'patient_oms', None):
              # ОМС есть, все ок
-             await show_patient_confirmation(bot, chat_id, ctx)
+             await show_patient_confirmation(bot, user_id, chat_id, ctx)
              return True
 
         ctx.step = "ENTER_OMS"
@@ -788,7 +788,7 @@ async def handle_text_input(bot, chat_id, text):
         ctx.patient_oms = oms
 
         # Переход к экрану подтверждения данных пациента
-        await show_patient_confirmation(bot, chat_id, ctx)
+        await show_patient_confirmation(bot, user_id, chat_id, ctx)
         return True
 
     return False

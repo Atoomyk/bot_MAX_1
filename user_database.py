@@ -48,9 +48,14 @@ class UserDatabase:
             return
 
         try:
+            # ДРОПАЕМ старые таблицы удалены, теперь только CREATE IF NOT EXISTS
+            # self.cursor.execute("DROP TABLE IF EXISTS user_reminders CASCADE;")
+            # self.cursor.execute("DROP TABLE IF EXISTS users CASCADE;")
+            
             create_table_query = """
             CREATE TABLE IF NOT EXISTS users (
-                chat_id VARCHAR(255) PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
+                last_chat_id BIGINT,
                 fio TEXT NOT NULL,
                 phone VARCHAR(20) UNIQUE NOT NULL,
                 birth_date VARCHAR(10) NOT NULL,
@@ -61,12 +66,6 @@ class UserDatabase:
             );
             """
             self.cursor.execute(create_table_query)
-
-            self._add_column_if_not_exists('birth_date', 'VARCHAR(10)')
-            self._add_column_if_not_exists('registration_date', 'TEXT')
-            self._add_column_if_not_exists('snils', 'VARCHAR(14)')
-            self._add_column_if_not_exists('oms', 'VARCHAR(16)')
-            self._add_column_if_not_exists('gender', 'VARCHAR(10)')
 
             self.conn.commit()
             log_system_event("database", "users_table_initialized")
@@ -81,66 +80,22 @@ class UserDatabase:
     def _create_reminders_table(self):
         """
         Создаёт таблицу напоминаний, если не существует.
-        enabled = TRUE по умолчанию
         """
         try:
             query = """
             CREATE TABLE IF NOT EXISTS user_reminders (
-                chat_id VARCHAR(255) PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 
                 CONSTRAINT fk_user_reminders_user
-                    FOREIGN KEY (chat_id) 
-                    REFERENCES users(chat_id)
+                    FOREIGN KEY (user_id) 
+                    REFERENCES users(user_id)
                     ON DELETE CASCADE
             );
             """
             self.cursor.execute(query)
-            
-            # Миграция: переименовываем колонку user_id в chat_id, если она существует
-            try:
-                # Проверяем, существует ли колонка user_id
-                self.cursor.execute("""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name='user_reminders' AND column_name='user_id'
-                """)
-                if self.cursor.fetchone():
-                    # Переименовываем колонку
-                    self.cursor.execute("""
-                        ALTER TABLE user_reminders 
-                        RENAME COLUMN user_id TO chat_id
-                    """)
-                    log_system_event("database", "reminders_column_renamed", column="user_id->chat_id")
-            except psycopg2.Error as e:
-                log_system_event("database", "reminders_column_rename_failed", error=str(e))
-                # Продолжаем работу, возможно колонка уже переименована или не существует
-            
-            # Миграция: добавляем внешний ключ, если его нет
-            try:
-                # Проверяем, существует ли уже внешний ключ
-                self.cursor.execute("""
-                    SELECT constraint_name 
-                    FROM information_schema.table_constraints 
-                    WHERE table_name='user_reminders' 
-                    AND constraint_type='FOREIGN KEY'
-                    AND constraint_name='fk_user_reminders_user'
-                """)
-                if not self.cursor.fetchone():
-                    # Добавляем внешний ключ
-                    self.cursor.execute("""
-                        ALTER TABLE user_reminders 
-                        ADD CONSTRAINT fk_user_reminders_user
-                        FOREIGN KEY (chat_id) 
-                        REFERENCES users(chat_id)
-                        ON DELETE CASCADE
-                    """)
-                    log_system_event("database", "reminders_foreign_key_added", constraint="fk_user_reminders_user")
-            except psycopg2.Error as e:
-                log_system_event("database", "reminders_foreign_key_failed", error=str(e))
-                # Продолжаем работу, возможно ключ уже существует
-            
             self.conn.commit()
             log_system_event("database", "reminders_table_initialized")
         except psycopg2.Error as e:
@@ -150,43 +105,43 @@ class UserDatabase:
     # ---------------------------------------------------------------------
     # Создание записи для нового пользователя
     # ---------------------------------------------------------------------
-    def init_user_reminder_record(self, chat_id: str):
+    def init_user_reminder_record(self, user_id: int):
         """
         Создаёт запись с enabled=TRUE, если её еще нет.
         """
         try:
             self.cursor.execute(
-                "SELECT 1 FROM user_reminders WHERE chat_id = %s",
-                (chat_id,)
+                "SELECT 1 FROM user_reminders WHERE user_id = %s",
+                (user_id,)
             )
             if self.cursor.fetchone():
                 return  # уже существует
 
             self.cursor.execute(
                 """
-                INSERT INTO user_reminders (chat_id, enabled, updated_at)
+                INSERT INTO user_reminders (user_id, enabled, updated_at)
                 VALUES (%s, TRUE, NOW())
                 """,
-                (chat_id,)
+                (user_id,)
             )
             self.conn.commit()
-            log_system_event("database", "reminder_record_created", chat_id=chat_id)
+            log_system_event("database", "reminder_record_created", user_id=user_id)
 
         except psycopg2.Error as e:
-            log_system_event("database", "reminder_record_create_error", error=str(e), chat_id=chat_id)
+            log_system_event("database", "reminder_record_create_error", error=str(e), user_id=user_id)
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
     # Получение полных данных пользователя для записи к врачу
     # ---------------------------------------------------------------------
-    def get_user_full_data(self, chat_id: str):
+    def get_user_full_data(self, user_id: int):
         """
         Возвращает dict {fio, birth_date, phone, snils, oms, gender} или None
         """
         try:
             self.cursor.execute(
-                "SELECT fio, birth_date, phone, snils, oms, gender FROM users WHERE chat_id = %s",
-                (chat_id,)
+                "SELECT fio, birth_date, phone, snils, oms, gender FROM users WHERE user_id = %s",
+                (user_id,)
             )
             row = self.cursor.fetchone()
             if row:
@@ -200,54 +155,54 @@ class UserDatabase:
                 }
             return None
         except psycopg2.Error as e:
-            log_system_event("database", "get_user_full_data_error", error=str(e), chat_id=chat_id)
+            log_system_event("database", "get_user_full_data_error", error=str(e), user_id=user_id)
             return None
 
     # ---------------------------------------------------------------------
     # Получение статуса включено/выключено
     # ---------------------------------------------------------------------
-    def get_reminders_status(self, chat_id: str) -> bool:
+    def get_reminders_status(self, user_id: int) -> bool:
         """
         Возвращает TRUE/FALSE.
         Если записи нет — создаёт по умолчанию TRUE.
         """
         try:
             self.cursor.execute(
-                "SELECT enabled FROM user_reminders WHERE chat_id = %s",
-                (chat_id,)
+                "SELECT enabled FROM user_reminders WHERE user_id = %s",
+                (user_id,)
             )
             row = self.cursor.fetchone()
 
             if not row:
                 # создаём запись по умолчанию
-                self.init_user_reminder_record(chat_id)
+                self.init_user_reminder_record(user_id)
                 return True
 
             return row[0]
 
         except psycopg2.Error as e:
-            log_system_event("database", "get_reminders_status_error", error=str(e), chat_id=chat_id)
+            log_system_event("database", "get_reminders_status_error", error=str(e), user_id=user_id)
             return True  # безопасное значение по умолчанию
 
     # ---------------------------------------------------------------------
     # Установка статуса
     # ---------------------------------------------------------------------
-    def set_reminders_status(self, chat_id: str, enabled: bool):
+    def set_reminders_status(self, user_id: int, enabled: bool):
         try:
             self.cursor.execute(
                 """
-                INSERT INTO user_reminders (chat_id, enabled, updated_at)
+                INSERT INTO user_reminders (user_id, enabled, updated_at)
                 VALUES (%s, %s, NOW())
-                ON CONFLICT (chat_id)
+                ON CONFLICT (user_id)
                 DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()
                 """,
-                (chat_id, enabled)
+                (user_id, enabled)
             )
             self.conn.commit()
-            log_system_event("database", "reminders_status_updated", chat_id=chat_id, enabled=enabled)
+            log_system_event("database", "reminders_status_updated", user_id=user_id, enabled=enabled)
 
         except psycopg2.Error as e:
-            log_system_event("database", "reminders_status_update_error", error=str(e), chat_id=chat_id)
+            log_system_event("database", "reminders_status_update_error", error=str(e), user_id=user_id)
             self.conn.rollback()
 
     # ---------------------------------------------------------------------
@@ -272,17 +227,17 @@ class UserDatabase:
 
     # ----- Оригинальные методы регистрации/валидации (не менялись) -----
 
-    def is_user_registered(self, chat_id: str) -> bool:
+    def is_user_registered(self, user_id: int) -> bool:
         try:
-            self.cursor.execute("SELECT 1 FROM users WHERE chat_id = %s", (chat_id,))
+            self.cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
             return self.cursor.fetchone() is not None
         except psycopg2.Error as e:
-            log_system_event("database", "query_failed", error=str(e), chat_id=chat_id)
+            log_system_event("database", "query_failed", error=str(e), user_id=user_id)
             return False
 
-    def get_user_greeting(self, chat_id: str) -> str:
+    def get_user_greeting(self, user_id: int) -> str:
         try:
-            self.cursor.execute("SELECT fio FROM users WHERE chat_id = %s", (chat_id,))
+            self.cursor.execute("SELECT fio FROM users WHERE user_id = %s", (user_id,))
             row = self.cursor.fetchone()
             if not row:
                 return "гость"
@@ -290,6 +245,27 @@ class UserDatabase:
             return " ".join(fio[1:]) if len(fio) >= 2 else fio[0]
         except psycopg2.Error:
             return "гость"
+
+    def update_last_chat_id(self, user_id: int, chat_id: int):
+        """Обновляет последний известный chat_id пользователя"""
+        try:
+            self.cursor.execute(
+                "UPDATE users SET last_chat_id = %s WHERE user_id = %s",
+                (chat_id, user_id)
+            )
+            self.conn.commit()
+        except psycopg2.Error as e:
+            log_system_event("database", "update_last_chat_id_failed", error=str(e), user_id=user_id)
+            self.conn.rollback()
+
+    def get_last_chat_id(self, user_id: int) -> int:
+        """Получает последний известный chat_id пользователя"""
+        try:
+            self.cursor.execute("SELECT last_chat_id FROM users WHERE user_id = %s", (user_id,))
+            row = self.cursor.fetchone()
+            return row[0] if row else None
+        except psycopg2.Error:
+            return None
 
     def validate_fio(self, fio: str) -> bool:
         fio_cleaned = ' '.join(fio.split())
@@ -332,13 +308,18 @@ class UserDatabase:
     def validate_gender(self, gender: str) -> bool:
         return gender in ["Мужской", "Женский"]
 
-    def get_user_phone(self, chat_id: str) -> str:
+    def get_user_phone(self, user_id: int) -> str:
         try:
-            self.cursor.execute("SELECT phone FROM users WHERE chat_id = %s", (chat_id,))
+            self.cursor.execute("SELECT phone FROM users WHERE user_id = %s", (user_id,))
             row = self.cursor.fetchone()
             return row[0] if row else "Не указан"
         except psycopg2.Error:
             return "Не указан"
+    
+    # Сохраняем обратную совместимость с 'get_user_data' если он использовался (в old code был get_user_data но в приведенном snippet его нет, есть get_user_full_data)
+    # на всякий случай, если где-то используется
+    def get_user_data(self, user_id: int):
+         return self.get_user_full_data(user_id)
 
     def validate_user_data(self, fio, phone, birth_date, snils=None, oms=None, gender=None):
         base_valid = (
@@ -354,7 +335,7 @@ class UserDatabase:
             return False
         return base_valid
 
-    def register_user(self, chat_id: str, fio: str, phone: str, birth_date: str, snils: str = None, oms: str = None, gender: str = None) -> bool:
+    def register_user(self, user_id: int, chat_id: int, fio: str, phone: str, birth_date: str, snils: str = None, oms: str = None, gender: str = None) -> bool:
         if not self.validate_user_data(fio, phone, birth_date, snils, oms, gender):
             return False
 
@@ -366,24 +347,24 @@ class UserDatabase:
 
             self.cursor.execute(
                 """
-                INSERT INTO users (chat_id, fio, phone, birth_date, snils, oms, gender, registration_date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO users (user_id, last_chat_id, fio, phone, birth_date, snils, oms, gender, registration_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (chat_id, fio, phone_cleaned, birth_date, snils_cleaned, oms_cleaned, gender, reg_date)
+                (user_id, chat_id, fio, phone_cleaned, birth_date, snils_cleaned, oms_cleaned, gender, reg_date)
             )
             self.conn.commit()
 
             # ⚡ Создаём запись о напоминаниях
-            self.init_user_reminder_record(chat_id)
+            self.init_user_reminder_record(user_id)
 
             return True
 
         except psycopg2.Error as e:
-            log_system_event("database", "user_registration_failed", error=str(e), chat_id=chat_id)
+            log_system_event("database", "user_registration_failed", error=str(e), user_id=user_id)
             self.conn.rollback()
             return False
 
-    def update_user_data(self, chat_id: str, fio: str, birth_date: str, snils: str = None, oms: str = None, gender: str = None) -> bool:
+    def update_user_data(self, user_id: int, fio: str, birth_date: str, snils: str = None, oms: str = None, gender: str = None) -> bool:
         """
         Обновляет данные пользователя в БД.
         Используется для синхронизации с РМИС.
@@ -398,15 +379,15 @@ class UserDatabase:
                 """
                 UPDATE users 
                 SET fio = %s, birth_date = %s, snils = %s, oms = %s, gender = %s
-                WHERE chat_id = %s
+                WHERE user_id = %s
                 """,
-                (fio, birth_date, snils_cleaned, oms_cleaned, gender, chat_id)
+                (fio, birth_date, snils_cleaned, oms_cleaned, gender, user_id)
             )
             self.conn.commit()
-            log_system_event("database", "user_data_updated", chat_id=chat_id)
+            log_system_event("database", "user_data_updated", user_id=user_id)
             return True
         except psycopg2.Error as e:
-            log_system_event("database", "user_update_failed", error=str(e), chat_id=chat_id)
+            log_system_event("database", "user_update_failed", error=str(e), user_id=user_id)
             self.conn.rollback()
             return False
 

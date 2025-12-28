@@ -198,19 +198,18 @@ class UserDatabase:
             """,
 
             # 4. Таблица всех записей (История + Будущие)
-            # Поскольку таблица может существовать, мы проверим и добавим недостающие колонки отдельно
+            # Структура согласно требованию: id, appointment_json, external_visit_time, external_mo_name, created_at, status, cancelled_at, user_id, booking_source (TEXT)
             """
             CREATE TABLE IF NOT EXISTS appointments (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
-                external_id VARCHAR(100) UNIQUE, -- ID записи в МИС
-                doctor_name TEXT,
-                specialty TEXT,
-                mo_name TEXT,
-                mo_address TEXT,
-                room_number VARCHAR(20),
-                start_time TIMESTAMP,
-                end_time TIMESTAMP
+                appointment_json JSONB,          -- Все данные записи в JSON
+                external_visit_time TIMESTAMP,   -- Время визита (для удобства сортировки)
+                external_mo_name TEXT,           -- Название МО (для удобства отображения)
+                created_at TIMESTAMP DEFAULT NOW(),
+                status VARCHAR(50),              -- active, cancelled, etc.
+                cancelled_at TIMESTAMP,
+                booking_source VARCHAR(20) DEFAULT 'self_bot' -- Значения: 'self_bot', 'other_bot', 'external'
             );
             """
         ]
@@ -220,21 +219,41 @@ class UserDatabase:
                 self.cursor.execute(q)
             self.conn.commit()
             
-            # --- Миграция таблицы appointments (добавляем новые колонки, если их нет) ---
-            # Базовые поля, которые могли быть или нет:
+            # --- Миграция таблицы appointments ---
+            
+            self._add_column_if_not_exists("appointment_json", "JSONB", "appointments")
+            self._add_column_if_not_exists("external_visit_time", "TIMESTAMP", "appointments")
+            self._add_column_if_not_exists("external_mo_name", "TEXT", "appointments")
+            self._add_column_if_not_exists("created_at", "TIMESTAMP DEFAULT NOW()", "appointments")
             self._add_column_if_not_exists("status", "VARCHAR(50)", "appointments")
-            self._add_column_if_not_exists("visit_type", "VARCHAR(50)", "appointments")
-            self._add_column_if_not_exists("reminder_sent", "BOOLEAN DEFAULT FALSE", "appointments")
+            self._add_column_if_not_exists("cancelled_at", "TIMESTAMP", "appointments")
             
-            # Поля с запасом (Reserve)
-            self._add_column_if_not_exists("patient_note", "TEXT", "appointments")
-            self._add_column_if_not_exists("doctor_note", "TEXT", "appointments")
-            self._add_column_if_not_exists("referral_source", "TEXT", "appointments")
+            # Обработка booking_source (переименование из registered_in_bot или visit_type)
             
-            # Убедимся, что есть constraint
-            # (сложно добавить IF NOT EXISTS для constraint в одном запросе, 
-            # поэтому просто ловим ошибку или игнорируем, если constraint уже есть. 
-            # В данном случае, оставим этот момент, предполагая, что базовая структура есть)
+            # 1. Проверяем registered_in_bot (из предыдущего шага)
+            self.cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='appointments' AND column_name='registered_in_bot';")
+            if self.cursor.fetchone():
+                 self.cursor.execute("ALTER TABLE appointments RENAME COLUMN registered_in_bot TO booking_source;")
+                 
+                 # Миграция данных: 'myself' -> 'self_bot', 'other' -> 'other_bot'
+                 self.cursor.execute("UPDATE appointments SET booking_source = 'self_bot' WHERE booking_source = 'myself';")
+                 self.cursor.execute("UPDATE appointments SET booking_source = 'other_bot' WHERE booking_source = 'other';")
+                 # Если были boolean (true/false) и не конвертнулись раньше:
+                 # 'true' -> 'self_bot', 'false' -> 'other_bot' (на всякий случай)
+                 
+                 self.conn.commit()
+                 log_system_event("database", "column_renamed", old="registered_in_bot", new="booking_source")
+            
+            # 2. Проверяем visit_type (совсем старое, если вдруг database откатили)
+            self.cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='appointments' AND column_name='visit_type';")
+            if self.cursor.fetchone():
+                self.cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='appointments' AND column_name='booking_source';")
+                if not self.cursor.fetchone(): # Если еще нет нового
+                     self.cursor.execute("ALTER TABLE appointments RENAME COLUMN visit_type TO booking_source;")
+                     self.conn.commit()
+
+            # 3. Если ничего не было, создаем
+            self._add_column_if_not_exists("booking_source", "VARCHAR(20) DEFAULT 'self_bot'", "appointments")
 
             log_system_event("database", "mvp_tables_initialized")
         except psycopg2.Error as e:
@@ -535,6 +554,48 @@ class UserDatabase:
             return True
         except psycopg2.Error as e:
             log_system_event("database", "user_update_failed", error=str(e), user_id=user_id)
+            self.conn.rollback()
+            return False
+
+    def add_appointment(self, user_id: int, appointment_data: dict, booking_source: str = 'self_bot') -> bool:
+        """
+        Сохраняет запись о приеме врача.
+        :param user_id: ID пользователя, который создал запись
+        :param appointment_data: Полный JSON с данными о записи (включая данные пациента)
+        :param booking_source: 'self_bot', 'other_bot', или 'external'
+        """
+        try:
+            import json
+            
+            # Извлекаем ключевые поля для удобства (если они есть в JSON)
+            # Структура JSON зависит от API, но предполагаем наличие даты и МО
+            # Приоритет отдаем start_time, так как там лежит полный timestamp (Date + Time)
+            external_visit_time = appointment_data.get('start_time') or appointment_data.get('visit_time')
+            external_mo_name = appointment_data.get('mo_name') or appointment_data.get('lpu_name')
+            
+            # Сериализуем JSON
+            json_str = json.dumps(appointment_data, ensure_ascii=False)
+            
+            self.cursor.execute(
+                """
+                INSERT INTO appointments (
+                    user_id, 
+                    appointment_json, 
+                    external_visit_time, 
+                    external_mo_name, 
+                    created_at, 
+                    status, 
+                    booking_source
+                )
+                VALUES (%s, %s, %s, %s, NOW(), 'active', %s)
+                """,
+                (user_id, json_str, external_visit_time, external_mo_name, booking_source)
+            )
+            self.conn.commit()
+            log_system_event("database", "appointment_added", user_id=user_id)
+            return True
+        except psycopg2.Error as e:
+            log_system_event("database", "appointment_add_failed", error=str(e), user_id=user_id)
             self.conn.rollback()
             return False
 

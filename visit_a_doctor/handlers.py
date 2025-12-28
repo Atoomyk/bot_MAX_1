@@ -11,6 +11,7 @@ from visit_a_doctor.soap_parser import SoapResponseParser
 from visit_a_doctor.specialties_mapping import get_specialty_name
 from bot_utils import send_main_menu
 from user_database import db
+import re
 
 # Хранилище состояний: chat_id -> UserContext
 user_states = {}
@@ -71,7 +72,7 @@ async def send_mo_selection_menu(bot, chat_id, mos, ctx):
     """(Helper) Отправляет меню выбора МО с нумерацией"""
     
     menu_text = "🏥 Выберите медицинскую организацию:\n\n"
-    import re
+    # import re - Removed, using global import
     
     for i, mo in enumerate(mos):
         mo_name = mo['name']
@@ -262,15 +263,31 @@ async def handle_callback(bot, user_id, chat_id, payload):
                 from patient_api_client import get_patients_by_phone
                 found_patients = await get_patients_by_phone(phone)
                 
-                # Если нашли больше одного человека — предлагаем выбор.
-                # Если только один (это скорее всего сам юзер), то сразу переходим к ручному вводу (требование),
-                # поэтому условие > 1.
-                if found_patients and len(found_patients) > 1:
+                # Фильтруем список: исключаем самого пользователя (владельца)
+                filtered_patients = []
+                if found_patients:
+                    user_snils_clean = re.sub(r'\D', '', user_data.get('snils', ''))
+                    
+                    for p in found_patients:
+                        # Сравнение по СНИЛС
+                        p_snils_clean = re.sub(r'\D', '', p.get('snils', ''))
+                        if user_snils_clean and p_snils_clean and user_snils_clean == p_snils_clean:
+                            continue # Это сам юзер, пропускаем
+                        
+                        # Сравнение по ФИО + ДР (если нет СНИЛСа)
+                        if (p.get('fio', '').lower() == user_data.get('fio', '').lower() and 
+                            p.get('birth_date', '') == user_data.get('birth_date', '')):
+                            continue # Это сам юзер
+                            
+                        filtered_patients.append(p)
+                
+                # Если после фильтрации остались люди — предлагаем выбор.
+                if filtered_patients:
                     # Сохраняем кандидатов в контексте
-                    ctx.family_candidates = found_patients
+                    ctx.family_candidates = filtered_patients
                     
                     keyboard_rows = []
-                    for idx, p in enumerate(found_patients):
+                    for idx, p in enumerate(filtered_patients):
                         btn_text = f"{p['fio']} ({p['birth_date']})"
                         keyboard_rows.append([{'type': 'callback', 'text': btn_text, 'payload': f"doc_other_select_{idx}"}])
                     
@@ -305,7 +322,7 @@ async def handle_callback(bot, user_id, chat_id, payload):
                     # Пытаемся найти текущего пользователя в списке по СНИЛС или ФИО+ДР
                     my_snils = user_data.get('snils', '')
                     # Очистка СНИЛСа для сравнения
-                    import re
+                    # import re (Removed: using global)
                     my_snils_clean = re.sub(r'[\D]', '', my_snils) if my_snils else ""
 
                     matched_patient = None
@@ -659,6 +676,33 @@ async def handle_callback(bot, user_id, chat_id, payload):
                 f"За день до приёма вам придёт уведомление!\n"
                 f"\nЖдем вас на прием!\n"
             )
+            
+            # --- Сохранение в БД (New Logic) ---
+            try:
+                # Определяем источник записи
+                booking_src = "self_bot" if ctx.selected_person == "me" else "other_bot"
+                
+                visit_dt = f"{ctx.selected_date} {ctx.selected_time}"
+                
+                appointment_data = {
+                    "mo_name": mo_name,
+                    "doctor_name": ctx.selected_doctor_name,
+                    "specialty": ctx.selected_spec,
+                    "room_number": ctx.selected_room,
+                    "visit_date": ctx.selected_date,
+                    "visit_time": ctx.selected_time,
+                    "start_time": visit_dt, # Используется db.add_appointment для external_visit_time
+                    "patient_fio": getattr(ctx, 'patient_fio', ''),
+                    "patient_birthdate": getattr(ctx, 'patient_birthdate', ''),
+                    "patient_snils": getattr(ctx, 'patient_snils', ''),
+                    "patient_oms": getattr(ctx, 'patient_oms', ''),
+                    "patient_gender": getattr(ctx, 'patient_gender', ''),
+                    "slot_id": slot_id
+                }
+                db.add_appointment(user_id, appointment_data, booking_source=booking_src)
+            except Exception as e:
+                print(f"DB SAVE ERROR: {e}") # Non-blocking error logging
+
             await bot.send_message(chat_id=chat_id, text=summary, attachments=[kb.kb_final_menu()])
         else:
             await bot.send_message(chat_id=chat_id, text="❌ Ошибка при создании записи. Возможно слот уже занят.", attachments=[kb.kb_final_menu()])

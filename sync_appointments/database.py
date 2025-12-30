@@ -59,6 +59,7 @@ class AppointmentsDatabase:
             # Миграция: добавляем поля status и cancelled_at если их нет
             self._add_column_if_not_exists('status', "VARCHAR(20) DEFAULT 'active'")
             self._add_column_if_not_exists('cancelled_at', 'TIMESTAMP NULL')
+            self._add_column_if_not_exists('cancelled_by', 'VARCHAR(50) NULL')
             
             # Обновляем существующие записи: устанавливаем status = 'active'
             try:
@@ -215,6 +216,35 @@ class AppointmentsDatabase:
             logger.error(f"Ошибка получения записей пользователя {user_id}: {e}")
             return []
 
+    def get_all_active_future_appointments(self) -> List[Dict[str, Any]]:
+        """
+        Получает все активные будущие записи для всех пользователей.
+        Используется для синхронизации (поиск удаленных в МИС записей).
+        """
+        try:
+            query = """
+            SELECT id, user_id, external_visit_time, external_mo_name
+            FROM appointments 
+            WHERE status = 'active' AND external_visit_time >= NOW()
+            """
+            
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+            
+            appointments = []
+            for row in rows:
+                appointments.append({
+                    'id': row[0],
+                    'user_id': row[1],
+                    'visit_time': row[2],
+                    'mo_name': row[3]
+                })
+            return appointments
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения всех активных записей: {e}")
+            return []
+
     def get_appointment_by_id(self, appointment_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
         """
         Получает запись по ID.
@@ -349,13 +379,15 @@ class AppointmentsDatabase:
             if self.conn:
                 self.conn.rollback()
 
-    def cancel_appointment(self, appointment_id: int, user_id: int) -> Dict[str, Any]:
+    def cancel_appointment(self, appointment_id: int, user_id: int, cancelled_by: str = 'user_cancel', force: bool = False) -> Dict[str, Any]:
         """
         Отменяет запись к врачу.
 
         Args:
             appointment_id: ID записи
             user_id: ID пользователя (int)
+            cancelled_by: Кто отменил ('user_cancel', 'system_sync')
+            force: Если True, игнорировать проверки времени (для системной синхронизации)
 
         Returns:
             Словарь с результатом:
@@ -388,8 +420,8 @@ class AppointmentsDatabase:
                     'error': 'Запись уже отменена'
                 }
 
-            # Проверяем, прошло ли более 3 часов с момента создания
-            if created_at:
+            # Проверяем, прошло ли более 3 часов с момента создания (если не force)
+            if not force and created_at:
                 time_diff = datetime.now() - created_at
                 if time_diff.total_seconds() > 3 * 3600:  # 3 часа в секундах
                     return {
@@ -400,11 +432,11 @@ class AppointmentsDatabase:
             # Обновляем запись
             update_query = """
             UPDATE appointments 
-            SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
+            SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = %s
             WHERE id = %s AND user_id = %s AND status = 'active'
             RETURNING appointment_json
             """
-            self.cursor.execute(update_query, (appointment_id, user_id))
+            self.cursor.execute(update_query, (cancelled_by, appointment_id, user_id))
             
             if self.cursor.rowcount == 0:
                 return {
@@ -425,7 +457,7 @@ class AppointmentsDatabase:
                 # Пытаемся преобразовать в строку и распарсить
                 appointment_data = json.loads(str(appointment_json_result))
             
-            logger.info(f"Запись {appointment_id} успешно отменена пользователем {user_id}")
+            logger.info(f"Запись {appointment_id} успешно отменена пользователем {user_id}, кем: {cancelled_by}")
             
             return {
                 'success': True,
@@ -455,14 +487,14 @@ class AppointmentsDatabase:
         try:
             if user_id:
                 query = """
-                SELECT id, appointment_json, status, cancelled_at, created_at
+                SELECT id, appointment_json, status, cancelled_at, created_at, cancelled_by
                 FROM appointments 
                 WHERE id = %s AND user_id = %s
                 """
                 params = (appointment_id, user_id)
             else:
                 query = """
-                SELECT id, appointment_json, status, cancelled_at, created_at
+                SELECT id, appointment_json, status, cancelled_at, created_at, cancelled_by
                 FROM appointments 
                 WHERE id = %s
                 """
@@ -483,12 +515,16 @@ class AppointmentsDatabase:
                     # Пытаемся преобразовать в строку и распарсить
                     appointment_data = json.loads(str(appointment_data))
                 
+                # Безопасно получаем cancelled_by, если столбца/данных еще нет в старых записях
+                cancelled_by = row[5] if len(row) > 5 else None
+
                 return {
                     'id': row[0],
                     'data': appointment_data,
                     'status': row[2],
                     'cancelled_at': row[3],
-                    'created_at': row[4]
+                    'created_at': row[4],
+                    'cancelled_by': cancelled_by
                 }
             return None
 

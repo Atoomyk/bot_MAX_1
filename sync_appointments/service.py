@@ -92,6 +92,7 @@ class SyncService:
             # 4. Сохранение записей в БД и сбор новых записей для уведомлений
             logger.info("4. Сохранение записей в базу данных...")
             user_new_appointments = {}
+            added_appointment_ids = set() # ID только что добавленных записей
             total_saved = 0
             skipped_reminders_off = 0
             skipped_already_exists = 0
@@ -139,6 +140,8 @@ class SyncService:
 
                     # Получаем ID сохраненной записи для кнопки отмены
                     db_id = self._get_last_inserted_id(user_id, visit_time, mo_name)
+                    if db_id:
+                        added_appointment_ids.add(db_id)
 
                     # Добавляем в список для уведомлений
                     if user_id not in user_new_appointments:
@@ -160,6 +163,72 @@ class SyncService:
                         'doctor_fio': appointment_data.get('ФИО врача', 'не указано'),
                         'doctor_position': appointment_data.get('Должность врача', 'не указано')
                     })
+
+            # 4.1. Проверка отмененных записей (которые есть в БД, но нет в ответе МИС)
+            logger.info("4.1. Проверка удаленных в МИС записей...")
+            
+            # Собираем множество всех полученных записей (user_id, visit_time, mo_name)
+            
+            rmis_appointments_set = set()
+            for match in matched_records:
+                u_id = match['user_id']
+                m_data = match['patient_data']['metadata']
+                
+                # Приводим дату к строке без микросекунд для надежного сравнения
+                # Если в БД timestamp без зоны, а в парсере naive datetime - должно совпасть
+                visit_time = m_data['visit_time']
+                if isinstance(visit_time, str):
+                    # Если вдруг строка (хотя парсер возвращает datetime)
+                    visit_time_str = visit_time
+                else:
+                    # Округляем до секунд (убираем микросекунды) и приводим к ISO
+                    visit_time_str = visit_time.replace(microsecond=0).isoformat()
+
+                rmis_appointments_set.add((u_id, visit_time_str, m_data['mo_name']))
+            
+            # Получаем все активные будущие записи из БД
+            active_appointments = self.appointments_db.get_all_active_future_appointments()
+            
+            cancelled_by_sync_count = 0
+            
+            for local_app in active_appointments:
+                app_id = local_app['id']
+                
+                # Если мы только что добавили эту запись, не нужно её проверять/отменять
+                if app_id in added_appointment_ids:
+                    continue
+
+                local_visit_time = local_app['visit_time']
+                
+                if isinstance(local_visit_time, str):
+                     local_visit_time_str = local_visit_time
+                elif local_visit_time:
+                     local_visit_time_str = local_visit_time.replace(microsecond=0).isoformat()
+                else:
+                     continue # Некорректная запись в БД
+                
+                local_key = (local_app['user_id'], local_visit_time_str, local_app['mo_name'])
+                
+                # Если локальной записи нет в множестве записей из МИС -> она удалена
+                if local_key not in rmis_appointments_set:
+                    u_id = local_app['user_id']
+                    
+                    logger.warning(f"Обнаружена удаленная в МИС запись: id={app_id}, user={u_id}")
+                    # Логируем детали для отладки (повышаем уровень до WARNING, чтобы видеть в консоли юзера)
+                    logger.warning(f"  > Ключ локальный: {local_key}")
+                    logger.warning(f"  > Ключи МИС (первые 3): {list(rmis_appointments_set)[:3]}")
+                    
+                    # Отменяем локально
+                    cancel_result = self.appointments_db.cancel_appointment(
+                        appointment_id=app_id,
+                        user_id=u_id,
+                        cancelled_by='system_sync',
+                        force=True # Игнорируем проверку времени
+                    )
+                    
+                    if cancel_result['success']:
+                        logger.info(f"Запись {app_id} отменена системой синхронизации")
+                        cancelled_by_sync_count += 1
 
             # 5. Отправка уведомлений пользователям
             logger.info("5. Отправка уведомлений пользователям...")

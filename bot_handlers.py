@@ -378,7 +378,7 @@ async def message_callback(event: MessageCallback):
                 return
 
             # Если SOAP-запрос успешен — фиксируем отмену в БД
-            result = sync_service.appointments_db.cancel_appointment(appointment_id, user_id)
+            result = sync_service.appointments_db.cancel_appointment(appointment_id, user_id, cancelled_by='user_cancel')
             
             if result['success']:
                 log_user_event(user_id, "appointment_cancelled", appointment_id=appointment_id)
@@ -404,6 +404,11 @@ async def message_callback(event: MessageCallback):
         elif payload == "cancel_appointment_back":
             # Возврат в главное меню
             log_user_event(user_id, "appointment_cancel_cancelled")
+            
+            # Сбрасываем контекст записи к врачу
+            ctx = await get_or_create_context(user_id)
+            ctx.step = "INIT"
+            
             if db.is_user_registered(user_id):
                 greeting_name = db.get_user_greeting(user_id)
                 await send_main_menu(event.bot, chat_id, greeting_name)
@@ -507,6 +512,11 @@ async def message_callback(event: MessageCallback):
 
         elif payload == "back_to_main":
             log_user_event(user_id, "back_to_main_menu")
+            
+            # Сбрасываем контекст записи к врачу
+            ctx = await get_or_create_context(user_id)
+            ctx.step = "INIT"
+            
             if db.is_user_registered(user_id):
                 greeting_name = db.get_user_greeting(user_id)
                 await send_main_menu(event.bot, chat_id, greeting_name)

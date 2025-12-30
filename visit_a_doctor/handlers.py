@@ -743,6 +743,16 @@ async def handle_text_input(bot, user_id, chat_id, text):
     ctx = await get_or_create_context(user_id)
     is_self_booking = getattr(ctx, 'selected_person', '') == 'me'
 
+    # Список шагов, где разрешен текстовый ввод
+    text_input_steps = ['ENTER_FIO', 'ENTER_BIRTHDATE', 'ENTER_GENDER', 'ENTER_SNILS', 'ENTER_OMS']
+
+    if ctx.step not in text_input_steps:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Вы находитесь в сценарии записи. Нажмите «Назад», пока не выйдете в главное меню, или используйте кнопки на экране."
+        )
+        return True
+
     # ------------------ ФИО ------------------
     if ctx.step == "ENTER_FIO":
         if is_self_booking:

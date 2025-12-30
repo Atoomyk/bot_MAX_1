@@ -209,7 +209,8 @@ class UserDatabase:
                 created_at TIMESTAMP DEFAULT NOW(),
                 status VARCHAR(50),              -- active, cancelled, etc.
                 cancelled_at TIMESTAMP,
-                booking_source VARCHAR(20) DEFAULT 'self_bot' -- Значения: 'self_bot', 'other_bot', 'external'
+                booking_source VARCHAR(20) DEFAULT 'self_bot',
+                cancelled_by VARCHAR(50)         -- user_cancel / system_sync
             );
             """
         ]

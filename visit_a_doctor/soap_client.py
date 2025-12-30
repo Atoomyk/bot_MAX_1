@@ -6,9 +6,13 @@ import aiohttp
 import os
 from datetime import datetime, timedelta
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Конфигурация (в реальном проекте загружать из .env)
-# Используем URL из примера
-SOAP_URL = "http://192.168.240.26:8759/ws/rosminzdrav/fer3N/erwebservice_cc"
+# Используем URL из переменной окружения, или дефолтный (тестовый) если не задан
+SOAP_URL = os.getenv("SOAP_URL")
 SOAP_HEADERS = {
     "Content-Type": "text/xml; charset=utf-8",
 }

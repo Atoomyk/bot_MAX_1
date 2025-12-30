@@ -11,6 +11,7 @@ from visit_a_doctor.soap_parser import SoapResponseParser
 from visit_a_doctor.specialties_mapping import get_specialty_name
 from bot_utils import send_main_menu
 from user_database import db
+from logging_config import log_user_event, log_data_event
 import re
 
 # Хранилище состояний: chat_id -> UserContext
@@ -239,10 +240,12 @@ async def handle_callback(bot, user_id, chat_id, payload):
         session_id = SoapResponseParser.parse_session_id(xml)
         if not session_id:
              print(f"AUTH ERROR RESPONSE: {xml}") # Логируем ответ в консоль
+             log_data_event(user_id, "rms_auth_failed", snils=ctx.patient_snils)
              await bot.send_message(chat_id=chat_id, text="❌ Ошибка авторизации. Пациент не найден или данные некорректны.\n(Подробности в логах)")
              return
         
         ctx.session_id = session_id
+        log_data_event(user_id, "rms_auth_success", session_id=session_id)
         await process_mo_selection(bot, user_id, chat_id, ctx)
         return
 
@@ -252,6 +255,8 @@ async def handle_callback(bot, user_id, chat_id, payload):
         
         # Генерируем новый Session_ID для этой сессии записи
         ctx.client_session_id = str(uuid.uuid4())
+        log_user_event(user_id, "booking_session_started", client_session_id=ctx.client_session_id, selection=selection)
+        
         
         if selection == 'other':
             # ⚡ ЗАПРОС К API ПАЦИЕНТОВ ПО ТЕЛЕФОНУ ВЛАДЕЛЬЦА ⚡
@@ -346,10 +351,13 @@ async def handle_callback(bot, user_id, chat_id, payload):
                         need_update = False
                         
                         # Сравниваем поля. Данные из РМИС считаем эталоном.
+                        # Сравниваем поля. Данные из РМИС считаем эталоном.
                         if matched_patient.get('fio') != user_data.get('fio'): need_update = True
                         if matched_patient.get('birth_date') != user_data.get('birth_date'): need_update = True
                         if matched_patient.get('snils') != user_data.get('snils'): need_update = True
                         if matched_patient.get('oms') != user_data.get('oms'): need_update = True
+                        # Если пол пришел из РМИС и отличается - обновляем
+                        if matched_patient.get('gender') and matched_patient.get('gender') != user_data.get('gender'): need_update = True
                         
                         if need_update:
                             db.update_user_data(
@@ -358,13 +366,15 @@ async def handle_callback(bot, user_id, chat_id, payload):
                                 matched_patient['birth_date'],
                                 matched_patient.get('snils'),
                                 matched_patient.get('oms'),
-                                user_data.get('gender') # Пол РМИС не всегда отдает, оставляем из БД
+                                matched_patient.get('gender') or user_data.get('gender')
                             )
                             # Обновляем локальные user_data
                             user_data['fio'] = matched_patient['fio']
                             user_data['birth_date'] = matched_patient['birth_date']
                             user_data['snils'] = matched_patient.get('snils')
                             user_data['oms'] = matched_patient.get('oms')
+                            if matched_patient.get('gender'):
+                                user_data['gender'] = matched_patient.get('gender')
                         
                         ctx.is_from_rms = True
                         await bot.send_message(chat_id=chat_id, text="✅ Ваши данные синхронизированы с Региональной системой.")
@@ -416,19 +426,33 @@ async def handle_callback(bot, user_id, chat_id, payload):
             ctx.patient_birthdate = selected_p['birth_date']
             ctx.patient_snils = selected_p['snils']
             ctx.patient_oms = selected_p['oms']
-            # Пол API не отдает, поэтому всегда запрашиваем
-            ctx.patient_gender = None 
+            ctx.patient_gender = selected_p.get('gender')
             ctx.is_from_rms = True
+
+            log_data_event(user_id, "booking_patient_selected", patient_snils=ctx.patient_snils, gender_autofilled=bool(ctx.patient_gender))
             
-            ctx.step = "ENTER_GENDER"
-            ctx.return_to_confirm = False
-            await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
+            if ctx.patient_gender:
+                    # Если пол есть - идем дальше
+                    # Пропускаем ENTER_GENDER
+                    if getattr(ctx, 'patient_snils', None):
+                        if getattr(ctx, 'patient_oms', None):
+                                await show_patient_confirmation(bot, user_id, chat_id, ctx)
+                        else:
+                                ctx.step = "ENTER_OMS"
+                                await bot.send_message(chat_id=chat_id, text="Введите номер полиса ОМС.")
+                    else:
+                        ctx.step = "ENTER_SNILS"
+                        await bot.send_message(chat_id=chat_id, text="Введите СНИЛС пациента (11 цифр).")
+            else:
+                ctx.step = "ENTER_GENDER"
+                ctx.return_to_confirm = False
+                await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
             
         except (ValueError, IndexError):
-             await bot.send_message(chat_id=chat_id, text="⚠ Ошибка выбора. Введите данные вручную.")
-             ctx.step = "ENTER_FIO"
-             ctx.return_to_confirm = False
-             await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.")
+                await bot.send_message(chat_id=chat_id, text="⚠ Ошибка выбора. Введите данные вручную.")
+                ctx.step = "ENTER_FIO"
+                ctx.return_to_confirm = False
+                await bot.send_message(chat_id=chat_id, text="Пожалуйста, введите ФИО пациента.")
         return
 
     # 1.5 Пол (Other) - Обработка кнопок

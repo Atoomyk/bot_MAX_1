@@ -62,11 +62,20 @@ async def get_patients_by_phone(phone: str) -> List[Dict[str, str]]:
                         father_name = item.get("FatherName", "").strip()
                         fio = f"{last_name} {first_name} {father_name}".strip()
 
+                        # Обработка пола "1" - М, "2" - Ж
+                        sex_code = item.get("Sex", "")
+                        gender = None
+                        if sex_code == "1":
+                            gender = "Мужской"
+                        elif sex_code == "2":
+                            gender = "Женский"
+
                         patient = {
                             "fio": fio,
                             "birth_date": item.get("Birthday", ""),
                             "snils": item.get("Snils", ""),
                             "oms": item.get("PolicyOmsNumber", ""),
+                            "gender": gender,
                             # Сохраняем и сырые данные на всякий случай
                             "raw_id": item.get("UniqueId", "") 
                         }

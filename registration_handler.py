@@ -365,14 +365,19 @@ class RegistrationHandler:
             user_data['birth_date'] = p['birth_date']
             user_data['snils'] = p['snils']
             user_data['oms'] = p['oms']
+            user_data['gender'] = p.get('gender')
             user_data['is_from_rms'] = True  # Флаг: данные из РМИС
 
             # Устанавливаем стейт (без candidates, т.к. выбор был безальтернативный)
-            self.user_states[user_id] = {'state': 'waiting_gender', 'data': user_data}
-            
-            log_data_event(user_id, "identity_autoselected_single", snils=user_data['snils'])
-            # Сразу переходим к запросу пола
-            await self.request_gender(bot_instance, user_id, chat_id, user_data)
+            # Если пол есть - сразу к подтверждению, иначе запрашиваем
+            if user_data.get('gender'):
+                 self.user_states[user_id] = {'state': 'waiting_confirmation', 'data': user_data}
+                 log_data_event(user_id, "identity_autoselected_single", snils=user_data['snils'], gender_autofilled=True)
+                 await self.send_confirmation_message(bot_instance, user_id, chat_id, user_data)
+            else:
+                 self.user_states[user_id] = {'state': 'waiting_gender', 'data': user_data}
+                 log_data_event(user_id, "identity_autoselected_single", snils=user_data['snils'])
+                 await self.request_gender(bot_instance, user_id, chat_id, user_data)
             return
 
         # Если нашли взрослых (>1) — предлагаем выбрать
@@ -425,16 +430,27 @@ class RegistrationHandler:
         user_data['birth_date'] = selected_patient['birth_date']
         user_data['snils'] = selected_patient['snils']
         user_data['oms'] = selected_patient['oms']
+        user_data['gender'] = selected_patient.get('gender') 
         user_data['is_from_rms'] = True # Флаг: данные из РМИС
 
-        self.user_states[user_id] = {
-            'state': 'waiting_gender',
-            'data': user_data,
-            'candidates': candidates # Сохраняем кандидатов для кнопки "Назад"
-        }
-        log_data_event(user_id, "identity_autofilled", snils=user_data['snils'])
-
-        await self.request_gender(bot_instance, user_id, chat_id, user_data)
+        if user_data.get('gender'):
+            # Пол есть - сразу к подтверждению
+            self.user_states[user_id] = {
+                'state': 'waiting_confirmation',
+                'data': user_data,
+                'candidates': candidates 
+            }
+            log_data_event(user_id, "identity_autofilled", snils=user_data['snils'], gender_autofilled=True)
+            await self.send_confirmation_message(bot_instance, user_id, chat_id, user_data)
+        else:
+             # Пола нет - запрашиваем
+            self.user_states[user_id] = {
+                'state': 'waiting_gender',
+                'data': user_data,
+                'candidates': candidates 
+            }
+            log_data_event(user_id, "identity_autofilled", snils=user_data['snils'])
+            await self.request_gender(bot_instance, user_id, chat_id, user_data)
  
     async def handle_back_to_list(self, bot_instance: Bot, user_id: int, chat_id: int):
         """Возврат к экрану выбора личности"""

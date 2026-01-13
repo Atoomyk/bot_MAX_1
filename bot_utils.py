@@ -305,6 +305,23 @@ async def keepalive_worker():
                 await asyncio.sleep(300)
 
 
+async def booking_states_cleanup_worker():
+    """Фоновая задача для очистки истекших состояний записи к врачу"""
+    from visit_a_doctor.handlers import cleanup_expired_states  # Ленивый импорт
+    
+    while True:
+        try:
+            await asyncio.sleep(300)  # Проверяем каждые 5 минут
+            cleaned_count = cleanup_expired_states()
+            if cleaned_count > 0:
+                log_system_event("booking_cleanup", "states_cleaned", count=cleaned_count)
+        except asyncio.CancelledError:
+            log_system_event("booking_cleanup", "worker_stopped")
+            break
+        except Exception as e:
+            log_system_event("booking_cleanup", "worker_error", error=str(e))
+            await asyncio.sleep(300)
+
 async def chat_cleanup_worker():
     """Фоновая задача для очистки чатов поддержки"""
     from bot_config import support_handler  # Ленивый импорт

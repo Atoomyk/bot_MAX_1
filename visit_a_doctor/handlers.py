@@ -13,6 +13,7 @@ from bot_utils import send_main_menu
 from user_database import db
 from logging_config import log_user_event, log_data_event
 import re
+from datetime import datetime, timedelta
 
 # Хранилище состояний: chat_id -> UserContext
 user_states = {}
@@ -21,9 +22,16 @@ user_states = {}
 # В реальном проде можно кешировать на уровне UserContext или Redis
 session_cache = {} # chat_id -> {'mos': [], 'specs': [], 'doctors': [], 'slots': []}
 
+# Константы таймаутов
+INACTIVITY_TIMEOUT_MINUTES = 30  # Таймаут неактивности пользователя
+SOAP_SESSION_TIMEOUT_MINUTES = 60  # Таймаут SOAP-сессии
+
 async def get_or_create_context(user_id: int) -> UserContext:
     if user_id not in user_states:
         user_states[user_id] = UserContext(user_id=user_id)
+    else:
+        # Обновляем время активности при обращении к контексту
+        user_states[user_id].update_activity()
     return user_states[user_id]
 
 def get_cache(user_id: int):
@@ -31,12 +39,104 @@ def get_cache(user_id: int):
         session_cache[user_id] = {}
     return session_cache[user_id]
 
+def cleanup_expired_states():
+    """
+    Очищает истекшие состояния пользователей.
+    Удаляет состояния, которые неактивны более INACTIVITY_TIMEOUT_MINUTES минут.
+    """
+    expired_users = []
+    for user_id, ctx in user_states.items():
+        if ctx.is_expired(INACTIVITY_TIMEOUT_MINUTES):
+            expired_users.append(user_id)
+            # Также очищаем кэш
+            session_cache.pop(user_id, None)
+    
+    for user_id in expired_users:
+        del user_states[user_id]
+        log_user_event(user_id, "booking_session_expired", reason="inactivity_timeout")
+    
+    return len(expired_users)
+
+async def check_session_validity(bot, user_id: int, chat_id: int, ctx: UserContext) -> bool:
+    """
+    Проверяет валидность SOAP-сессии и активности пользователя.
+    
+    Returns:
+        True если сессия валидна и пользователь активен, False иначе
+    """
+    # Проверка таймаута неактивности
+    if ctx.is_expired(INACTIVITY_TIMEOUT_MINUTES):
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⏱️ Ваша сессия записи к врачу истекла из-за неактивности (30 минут).\nПожалуйста, начните запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        cleanup_expired_states()
+        return False
+    
+    # Проверка валидности SOAP-сессии (только если сессия уже создана)
+    if ctx.session_id and ctx.is_session_expired(SOAP_SESSION_TIMEOUT_MINUTES):
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⏱️ Сессия авторизации истекла (60 минут).\nПожалуйста, начните запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        # Очищаем состояние
+        if user_id in user_states:
+            del user_states[user_id]
+        session_cache.pop(user_id, None)
+        log_user_event(user_id, "booking_session_expired", reason="soap_session_timeout")
+        return False
+    
+    return True
+
+async def handle_soap_error(bot, user_id: int, chat_id: int, error_msg: str, ctx: UserContext = None):
+    """
+    Обрабатывает ошибки SOAP-запросов, связанные с истекшей сессией.
+    
+    Args:
+        bot: Экземпляр бота
+        user_id: ID пользователя
+        chat_id: ID чата
+        error_msg: Сообщение об ошибке
+        ctx: Контекст пользователя (опционально)
+    """
+    # Проверяем, является ли ошибка связанной с истекшей сессией
+    session_error_keywords = ['session', 'expired', 'invalid', 'unauthorized', 'timeout', 'connection']
+    is_session_error = any(keyword in error_msg.lower() for keyword in session_error_keywords)
+    
+    # Также проверяем, если сессия истекла по времени
+    if ctx and ctx.session_id:
+        if ctx.is_session_expired(SOAP_SESSION_TIMEOUT_MINUTES):
+            is_session_error = True
+    
+    if is_session_error and ctx:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="❌ Сессия авторизации истекла или стала недействительной.\nПожалуйста, начните запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        # Очищаем состояние
+        if user_id in user_states:
+            del user_states[user_id]
+        session_cache.pop(user_id, None)
+        log_user_event(user_id, "booking_session_expired", reason="soap_error", error=error_msg)
+    else:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Произошла ошибка при выполнении запроса.\nПопробуйте начать запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        if ctx:
+            log_user_event(user_id, "booking_soap_error", error=error_msg)
+
 async def show_patient_confirmation(bot, user_id, chat_id, ctx):
     """Показывает экран подтверждения данных пациента"""
     # Ensure we have the latest context
     ctx = await get_or_create_context(user_id)
     ctx.step = "CONFIRM_PATIENT_DATA"
-    ctx.return_to_confirm = False 
+    ctx.return_to_confirm = False
+    ctx.update_activity()  # Обновляем активность 
     
     summary = (
         "ℹ️ Проверьте данные пациента:\n\n"
@@ -63,6 +163,7 @@ async def start_booking(bot, user_id, chat_id):
     session_cache.pop(user_id, None) # Очистка кэша
     
     ctx.step = "PERSON"
+    ctx.update_activity()  # Обновляем активность при старте
     await bot.send_message(
         chat_id=chat_id,
         text="Кого записать на прием?",
@@ -112,21 +213,38 @@ async def send_mo_selection_menu(bot, chat_id, mos, ctx):
 
 async def process_mo_selection(bot, user_id, chat_id, ctx):
     """(Helper) Загружает и показывает список МО"""
-    xml = await SoapClient.get_mos(ctx.session_id)
-    mos = SoapResponseParser.parse_mo_list(xml)
-    
-    if not mos:
-        await bot.send_message(chat_id=chat_id, text="⚠️ Не удалось получить список медицинских организаций (или он пуст).")
+    # Проверяем валидность сессии перед запросом
+    if not await check_session_validity(bot, user_id, chat_id, ctx):
         return
-
-    # Кэшируем
-    get_cache(user_id)['mos'] = mos
     
-    await send_mo_selection_menu(bot, chat_id, mos, ctx)
+    try:
+        xml = await SoapClient.get_mos(ctx.session_id)
+        mos = SoapResponseParser.parse_mo_list(xml)
+        
+        if not mos:
+            await bot.send_message(chat_id=chat_id, text="⚠️ Не удалось получить список медицинских организаций (или он пуст).")
+            return
+
+        # Кэшируем
+        get_cache(user_id)['mos'] = mos
+        ctx.update_activity()  # Обновляем активность
+        
+        await send_mo_selection_menu(bot, chat_id, mos, ctx)
+    except Exception as e:
+        error_msg = str(e)
+        await handle_soap_error(bot, user_id, chat_id, error_msg, ctx)
 
 async def handle_callback(bot, user_id, chat_id, payload):
     ctx = await get_or_create_context(user_id)
     cache = get_cache(user_id)
+    
+    # Обновляем активность при любом действии пользователя
+    ctx.update_activity()
+    
+    # Проверяем валидность сессии перед обработкой (кроме restart)
+    if payload != 'doc_restart':
+        if not await check_session_validity(bot, user_id, chat_id, ctx):
+            return
     
     if payload == 'doc_restart':
         await start_booking(bot, user_id, chat_id)
@@ -245,6 +363,8 @@ async def handle_callback(bot, user_id, chat_id, payload):
              return
         
         ctx.session_id = session_id
+        ctx.session_created_at = datetime.now()  # Сохраняем время создания сессии
+        ctx.update_activity()  # Обновляем активность
         log_data_event(user_id, "rms_auth_success", session_id=session_id)
         await process_mo_selection(bot, user_id, chat_id, ctx)
         return
@@ -501,10 +621,18 @@ async def handle_callback(bot, user_id, chat_id, payload):
             await bot.send_message(chat_id=chat_id, text="Ошибка выбора МО. Попробуйте снова.")
             return
 
+        # Проверяем валидность сессии перед запросом
+        if not await check_session_validity(bot, user_id, chat_id, ctx):
+            return
+        
         # Загружаем специальности
         await bot.send_message(chat_id=chat_id, text="🔄 Загрузка специальностей...")
-        xml = await SoapClient.get_specs(ctx.session_id, mo_id)
-        specs_data = SoapResponseParser.parse_specialties(xml)
+        try:
+            xml = await SoapClient.get_specs(ctx.session_id, mo_id)
+            specs_data = SoapResponseParser.parse_specialties(xml)
+        except Exception as e:
+            await handle_soap_error(bot, user_id, chat_id, str(e), ctx)
+            return
         
         # Маппинг имен
         specs_ui = []
@@ -520,6 +648,7 @@ async def handle_callback(bot, user_id, chat_id, payload):
         cache['specs'] = specs_ui
         ctx.step = "SPEC"
         ctx.spec_page = 0
+        ctx.update_activity()  # Обновляем активность
         
         # Get MO Name for display
         # selected_mo already retrieved above
@@ -553,10 +682,18 @@ async def handle_callback(bot, user_id, chat_id, payload):
         found_spec = next((s for s in specs if s['id'] == post_id), None)
         ctx.selected_spec = found_spec['name'] if found_spec else post_id
         
+        # Проверяем валидность сессии перед запросом
+        if not await check_session_validity(bot, user_id, chat_id, ctx):
+            return
+        
         # Загружаем врачей
         await bot.send_message(chat_id=chat_id, text="🔄 Поиск врачей...")
-        xml = await SoapClient.get_doctors(ctx.session_id, post_id, ctx.selected_mo_oid)
-        doctors = SoapResponseParser.parse_doctors(xml)
+        try:
+            xml = await SoapClient.get_doctors(ctx.session_id, post_id, ctx.selected_mo_oid)
+            doctors = SoapResponseParser.parse_doctors(xml)
+        except Exception as e:
+            await handle_soap_error(bot, user_id, chat_id, str(e), ctx)
+            return
         
         if not doctors:
              await bot.send_message(chat_id=chat_id, text="Нет свободных врачей по этой специальности.", attachments=[kb.create_keyboard([[kb.get_back_button('doc_back_to_spec')]])])
@@ -612,6 +749,10 @@ async def handle_callback(bot, user_id, chat_id, payload):
         date_str = payload.replace('doc_date_', '')
         ctx.selected_date = date_str
         
+        # Проверяем валидность сессии перед запросом
+        if not await check_session_validity(bot, user_id, chat_id, ctx):
+            return
+        
         # Загружаем слоты
         await bot.send_message(chat_id=chat_id, text="🔄 Загрузка свободного времени...")
         
@@ -626,8 +767,12 @@ async def handle_callback(bot, user_id, chat_id, payload):
             specialist_snils = ''
             room_id = getattr(ctx, 'selected_room_id', '')
         
-        xml = await SoapClient.get_slots(ctx.session_id, specialist_snils, ctx.selected_mo_oid, ctx.selected_post_id, date_str, room_id)
-        slots = SoapResponseParser.parse_slots(xml)
+        try:
+            xml = await SoapClient.get_slots(ctx.session_id, specialist_snils, ctx.selected_mo_oid, ctx.selected_post_id, date_str, room_id)
+            slots = SoapResponseParser.parse_slots(xml)
+        except Exception as e:
+            await handle_soap_error(bot, user_id, chat_id, str(e), ctx)
+            return
         
         if not slots:
              await bot.send_message(chat_id=chat_id, text="Нет свободного времени на эту дату.")
@@ -696,14 +841,22 @@ async def handle_callback(bot, user_id, chat_id, payload):
 
     # ФИНАЛ
     if payload == 'doc_confirm_booking':
+        # Проверяем валидность сессии перед финальным запросом
+        if not await check_session_validity(bot, user_id, chat_id, ctx):
+            return
+        
         await bot.send_message(chat_id=chat_id, text="🔄 Оформление записи...")
         
         # Отправляем запрос
         # slot_id мы сохранили динамически в ctx (Python позволяет)
         slot_id = getattr(ctx, 'selected_slot_id', "")
         
-        xml = await SoapClient.book_appointment(ctx.session_id, slot_id)
-        success = SoapResponseParser.parse_booking_status(xml)
+        try:
+            xml = await SoapClient.book_appointment(ctx.session_id, slot_id)
+            success = SoapResponseParser.parse_booking_status(xml)
+        except Exception as e:
+            await handle_soap_error(bot, user_id, chat_id, str(e), ctx)
+            return
         
         if success:
             person_str = "Вы записали себя" if ctx.selected_person == "me" else "Вы записали другого человека"
@@ -762,10 +915,18 @@ async def handle_callback(bot, user_id, chat_id, payload):
         
 
 # visit_a_doctor/handlers_text_input.py
-from visit_a_doctor.handlers import get_or_create_context, show_patient_confirmation
+from visit_a_doctor.handlers import get_or_create_context, show_patient_confirmation, check_session_validity
 async def handle_text_input(bot, user_id, chat_id, text):
     """Обработка текстового ввода для модуля записи к врачу"""
     ctx = await get_or_create_context(user_id)
+    
+    # Обновляем активность при текстовом вводе
+    ctx.update_activity()
+    
+    # Проверяем валидность сессии
+    if not await check_session_validity(bot, user_id, chat_id, ctx):
+        return True
+    
     is_self_booking = getattr(ctx, 'selected_person', '') == 'me'
 
     # Список шагов, где разрешен текстовый ввод

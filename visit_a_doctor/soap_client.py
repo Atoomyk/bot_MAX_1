@@ -31,8 +31,10 @@ class SoapClient:
                     return await response.text()
 
             except Exception as e:
+                error_msg = str(e)
                 print(f"SOAP Connection Error: {e}")
-                return ""
+                # Пробрасываем исключение для обработки в handlers
+                raise Exception(f"SOAP connection error: {error_msg}")
 
     @staticmethod
     async def get_patient_session(snils, oms, birthdate, fio_parts, gender, client_session_id) -> str:

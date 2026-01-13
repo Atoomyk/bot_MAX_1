@@ -11,7 +11,8 @@ import bot_config
 import bot_handlers
 from bot_utils import (
     setup_webhook, keepalive_worker, chat_cleanup_worker,
-    notification_worker, stop_all_tasks, send_other_options_menu
+    notification_worker, booking_states_cleanup_worker,
+    stop_all_tasks, send_other_options_menu
 )
 from logging_config import log_system_event
 
@@ -21,7 +22,7 @@ reminder_handler.send_other_options_menu = send_other_options_menu
 
 async def main():
     """Главная функция запуска бота"""
-    global keepalive_task, chat_cleanup_task
+    global keepalive_task, chat_cleanup_task, booking_cleanup_task
 
     log_system_event("bot", "starting", webhook_mode=WEBHOOK_MODE, port=WEBHOOK_PORT)
 
@@ -45,6 +46,9 @@ async def main():
     chat_cleanup_task = asyncio.create_task(chat_cleanup_worker())
     log_system_event("chat_cleanup", "worker_started")
 
+    booking_cleanup_task = asyncio.create_task(booking_states_cleanup_worker())
+    log_system_event("booking_cleanup", "worker_started")
+
     notification_task = asyncio.create_task(notification_worker())
     log_system_event("notification", "worker_started")
 
@@ -53,7 +57,7 @@ async def main():
 
     if not webhook_success:
         log_system_event("bot", "webhook_setup_failed")
-        await stop_all_tasks(keepalive_task, chat_cleanup_task, notification_task)
+        await stop_all_tasks(keepalive_task, chat_cleanup_task, booking_cleanup_task, notification_task)
         return
 
     log_system_event("bot", "webhook_server_starting", port=WEBHOOK_PORT)
@@ -76,7 +80,7 @@ async def main():
             )
     finally:
         # Останавливаем все задачи при завершении работы
-        await stop_all_tasks(keepalive_task, chat_cleanup_task, notification_task)
+        await stop_all_tasks(keepalive_task, chat_cleanup_task, booking_cleanup_task, notification_task)
 
         # Останавливаем планировщик синхронизации
         if bot_config.scheduler_manager:

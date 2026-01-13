@@ -121,34 +121,67 @@ class SoapResponseParser:
             
             root = ET.fromstring(xml_clean)
             
-            # Иерархия: MO_Resource_List -> MO_Available -> Resource_Available -> Resource -> Specialist
+            # Иерархия: MO_Resource_List -> MO_Available -> Resource_Available -> Resource -> Specialist или Room
             
             for resource in root.findall(".//Resource"):
                 specialist = resource.find("Specialist")
+                room = resource.find("Room")
+                
+                # Собираем доступные даты (общее для обоих случаев)
+                dates = []
+                avail_dates = resource.find("Available_Dates")
+                if avail_dates is not None:
+                     for d in avail_dates.findall("Available_Date"):
+                         # 2025-12-19T00:00:00+03:00 -> 19.12.2025
+                         raw_date = d.text[:10] # 2025-12-19
+                         formatted_date = f"{raw_date[8:10]}.{raw_date[5:7]}.{raw_date[0:4]}"
+                         dates.append(formatted_date)
+                
+                if not dates:  # Пропускаем ресурсы без доступных дат
+                    continue
+                
+                # Случай 1: Есть Specialist (врач)
                 if specialist is not None:
-                    last = specialist.find("Last_Name").text
-                    first = specialist.find("First_Name").text
-                    middle = specialist.find("Middle_Name").text
-                    snils = specialist.find("SNILS").text
-                    doc_id = specialist.find("SNILS").text # Используем СНИЛС как ID, т.к. Post_Id общий
+                    last = specialist.find("Last_Name")
+                    first = specialist.find("First_Name")
+                    middle = specialist.find("Middle_Name")
+                    snils = specialist.find("SNILS")
                     
-                    full_name = f"{last} {first[0]}.{middle[0]}."
-                    
-                    # Собираем доступные даты
-                    dates = []
-                    avail_dates = resource.find("Available_Dates")
-                    if avail_dates is not None:
-                         for d in avail_dates.findall("Available_Date"):
-                             # 2025-12-19T00:00:00+03:00 -> 19.12.2025
-                             raw_date = d.text[:10] # 2025-12-19
-                             formatted_date = f"{raw_date[8:10]}.{raw_date[5:7]}.{raw_date[0:4]}"
-                             dates.append(formatted_date)
-                    
-                    if dates: # Добавляем только если есть даты
+                    if last is not None and first is not None and middle is not None and snils is not None:
+                        last_name = last.text or ""
+                        first_name = first.text or ""
+                        middle_name = middle.text or ""
+                        snils_text = snils.text or ""
+                        
+                        full_name = f"{last_name} {first_name[0]}.{middle_name[0]}."
+                        
                         doctors.append({
-                            "id": snils, # ID врача для следующих шагов
+                            "id": snils_text, # ID врача для следующих шагов
                             "name": full_name,
-                            "dates": dates
+                            "dates": dates,
+                            "type": "specialist"  # Маркер типа ресурса
+                        })
+                
+                # Случай 2: Есть только Room (кабинет без конкретного врача)
+                elif room is not None:
+                    room_id = room.find("Room_Id")
+                    room_number = room.find("Room_Number")
+                    room_name = room.find("Room_Name")
+                    
+                    if room_id is not None:
+                        room_id_text = room_id.text or ""
+                        room_number_text = room_number.text if room_number is not None else ""
+                        room_name_text = room_name.text if room_name is not None else ""
+                        
+                        # Используем Room_Id как идентификатор, а Room_Name или Room_Number как имя
+                        display_name = room_name_text if room_name_text else f"Кабинет {room_number_text}" if room_number_text else f"Кабинет {room_id_text}"
+                        
+                        doctors.append({
+                            "id": f"ROOM_{room_id_text}", # Префикс ROOM_ для идентификации кабинета
+                            "name": display_name,
+                            "dates": dates,
+                            "type": "room",  # Маркер типа ресурса
+                            "room_id": room_id_text  # Сохраняем Room_Id для запроса слотов
                         })
 
         except Exception as e:

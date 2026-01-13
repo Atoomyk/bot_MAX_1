@@ -564,12 +564,19 @@ async def handle_callback(bot, user_id, chat_id, payload):
 
         cache['doctors'] = doctors
         ctx.step = "DOCTOR"
-        await bot.send_message(chat_id=chat_id, text=f"Выберите врача ({ctx.selected_spec}):", attachments=[kb.kb_doctor_selection(doctors)])
+        # Определяем текст в зависимости от типа ресурсов (врачи или кабинеты)
+        selection_text = f"Выберите врача ({ctx.selected_spec}):"
+        # Проверяем, есть ли среди ресурсов кабинеты
+        has_rooms = any(d.get('type') == 'room' for d in doctors)
+        if has_rooms:
+            selection_text = f"Выберите врача или кабинет ({ctx.selected_spec}):"
+        
+        await bot.send_message(chat_id=chat_id, text=selection_text, attachments=[kb.kb_doctor_selection(doctors)])
         return
 
     # 4. Выбор врача
     if payload.startswith('doc_doc_'):
-        doc_id = payload.replace('doc_doc_', '') # Это SNILS врача
+        doc_id = payload.replace('doc_doc_', '') # Это SNILS врача или ROOM_XXX для кабинета
         
         doctors = cache.get('doctors', [])
         found_doc = next((d for d in doctors if d['id'] == doc_id), None)
@@ -578,6 +585,12 @@ async def handle_callback(bot, user_id, chat_id, payload):
             ctx.selected_doctor_id = doc_id
             ctx.selected_doctor_name = found_doc['name']
             ctx.available_dates_cache = found_doc['dates'] # Сохраняем даты из объекта врача
+            
+            # Сохраняем тип ресурса и room_id если это кабинет
+            resource_type = found_doc.get('type', 'specialist')
+            ctx.selected_resource_type = resource_type
+            if resource_type == 'room':
+                ctx.selected_room_id = found_doc.get('room_id', '')
         else:
             await bot.send_message(chat_id=chat_id, text="Ошибка выбора врача.")
             return
@@ -601,7 +614,19 @@ async def handle_callback(bot, user_id, chat_id, payload):
         
         # Загружаем слоты
         await bot.send_message(chat_id=chat_id, text="🔄 Загрузка свободного времени...")
-        xml = await SoapClient.get_slots(ctx.session_id, ctx.selected_doctor_id, ctx.selected_mo_oid, ctx.selected_post_id, date_str)
+        
+        # Определяем SNILS для запроса: для кабинетов используем пустую строку
+        resource_type = getattr(ctx, 'selected_resource_type', 'specialist')
+        specialist_snils = ctx.selected_doctor_id
+        
+        # Если это кабинет (ROOM_XXX), используем пустой SNILS
+        room_id = None
+        if resource_type == 'room' and ctx.selected_doctor_id.startswith('ROOM_'):
+            # Для кабинетов используем пустой SNILS
+            specialist_snils = ''
+            room_id = getattr(ctx, 'selected_room_id', '')
+        
+        xml = await SoapClient.get_slots(ctx.session_id, specialist_snils, ctx.selected_mo_oid, ctx.selected_post_id, date_str, room_id)
         slots = SoapResponseParser.parse_slots(xml)
         
         if not slots:

@@ -114,7 +114,7 @@ class SoapClient:
         return await SoapClient._send_request(xml, "GetMOResourceInfo")
 
     @staticmethod
-    async def get_slots(session_id: str, specialist_snils: str, mo_oid: str, post_id: str, date: str) -> str:
+    async def get_slots(session_id: str, specialist_snils: str, mo_oid: str, post_id: str, date: str, room_id: str = None) -> str:
         """9. GetScheduleInfoRequest"""
         # date expected format YYYY-MM-DD for Request? The example shows ranges. 
         # But we are selecting a specific date. Let's use that date as Range.
@@ -122,11 +122,14 @@ class SoapClient:
         d_obj = datetime.strptime(date, "%d.%m.%Y")
         fmt_date = d_obj.strftime("%Y-%m-%d")
         
+        # Для кабинетов specialist_snils может быть пустым
+        specialist_snils_value = specialist_snils if specialist_snils else ""
+        
         xml = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
     <soapenv:Body>
         <GetScheduleInfoRequest xmlns="http://www.rt-eu.ru/med/er/v2_0">
             <Session_ID>{session_id}</Session_ID>
-            <Specialist_SNILS>{specialist_snils}</Specialist_SNILS>
+            <Specialist_SNILS>{specialist_snils_value}</Specialist_SNILS>
             <MO_OID>{mo_oid}</MO_OID>
             <Service_Post>
                 <Post>

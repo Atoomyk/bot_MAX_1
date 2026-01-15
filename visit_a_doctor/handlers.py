@@ -877,6 +877,7 @@ async def handle_callback(bot, user_id, chat_id, payload):
                 f"⏰ Время: {ctx.selected_time}\n"
                 f"За день до приёма вам придёт уведомление!\n"
                 f"\nЖдем вас на прием!\n"
+                f"Вы можете отменить запись, позвонив на бесплатный номер 122.\n"
             )
             
             # --- Сохранение в БД (New Logic) ---

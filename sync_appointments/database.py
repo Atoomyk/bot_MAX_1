@@ -134,6 +134,7 @@ class AppointmentsDatabase:
                         visit_time: datetime, mo_name: str) -> bool:
         """
         Добавляет новую запись к врачу.
+        ВАЖНО: Проверяет существование пользователя в таблице users перед вставкой.
 
         Args:
             user_id: ID пользователя (int)
@@ -145,6 +146,12 @@ class AppointmentsDatabase:
             True если запись успешно добавлена
         """
         try:
+            # Проверка существования пользователя в users
+            self.cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+            if not self.cursor.fetchone():
+                logger.warning(f"Пропуск добавления записи: пользователь user_id={user_id} не найден в базе")
+                return False  # пользователь не зарегистрирован
+            
             # Преобразуем данные в JSON
             appointment_json = json.dumps(appointment_data, ensure_ascii=False)
 

@@ -303,8 +303,19 @@ class UserDatabase:
     def init_user_reminder_record(self, user_id: int):
         """
         Создаёт запись с enabled=TRUE, если её еще нет.
+        ВАЖНО: Проверяет существование пользователя в таблице users перед вставкой.
         """
         try:
+            # Проверка существования пользователя в users
+            self.cursor.execute(
+                "SELECT 1 FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            if not self.cursor.fetchone():
+                log_system_event("database", "reminder_record_create_skipped", reason="user_not_found", user_id=user_id)
+                return  # пользователь не зарегистрирован
+            
+            # Проверка существования записи о напоминаниях
             self.cursor.execute(
                 "SELECT 1 FROM user_reminders WHERE user_id = %s",
                 (user_id,)
@@ -381,9 +392,18 @@ class UserDatabase:
     def get_reminders_status(self, user_id: int) -> bool:
         """
         Возвращает TRUE/FALSE.
-        Если записи нет — создаёт по умолчанию TRUE.
+        Если записи нет — создаёт по умолчанию TRUE (только для зарегистрированных пользователей).
         """
         try:
+            # Проверка существования пользователя в users
+            self.cursor.execute(
+                "SELECT 1 FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            if not self.cursor.fetchone():
+                log_system_event("database", "get_reminders_status_skipped", reason="user_not_found", user_id=user_id)
+                return True  # безопасное значение по умолчанию
+            
             self.cursor.execute(
                 "SELECT enabled FROM user_reminders WHERE user_id = %s",
                 (user_id,)
@@ -391,7 +411,7 @@ class UserDatabase:
             row = self.cursor.fetchone()
 
             if not row:
-                # создаём запись по умолчанию
+                # создаём запись по умолчанию (только если пользователь зарегистрирован)
                 self.init_user_reminder_record(user_id)
                 return True
 
@@ -405,7 +425,20 @@ class UserDatabase:
     # Установка статуса
     # ---------------------------------------------------------------------
     def set_reminders_status(self, user_id: int, enabled: bool):
+        """
+        Устанавливает статус напоминаний для пользователя.
+        ВАЖНО: Проверяет существование пользователя в таблице users перед операцией.
+        """
         try:
+            # Проверка существования пользователя в users
+            self.cursor.execute(
+                "SELECT 1 FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            if not self.cursor.fetchone():
+                log_system_event("database", "reminders_status_update_skipped", reason="user_not_found", user_id=user_id)
+                return  # пользователь не зарегистрирован
+            
             self.cursor.execute(
                 """
                 INSERT INTO user_reminders (user_id, enabled, updated_at)
@@ -619,12 +652,22 @@ class UserDatabase:
     def add_appointment(self, user_id: int, appointment_data: dict, booking_source: str = 'self_bot') -> bool:
         """
         Сохраняет запись о приеме врача.
+        ВАЖНО: Проверяет существование пользователя в таблице users перед вставкой.
         :param user_id: ID пользователя, который создал запись
         :param appointment_data: Полный JSON с данными о записи (включая данные пациента)
         :param booking_source: 'self_bot', 'other_bot', или 'external'
         """
         try:
             import json
+            
+            # Проверка существования пользователя в users
+            self.cursor.execute(
+                "SELECT 1 FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            if not self.cursor.fetchone():
+                log_system_event("database", "appointment_add_skipped", reason="user_not_found", user_id=user_id)
+                return False  # пользователь не зарегистрирован
             
             # Извлекаем ключевые поля для удобства (если они есть в JSON)
             # Структура JSON зависит от API, но предполагаем наличие даты и МО

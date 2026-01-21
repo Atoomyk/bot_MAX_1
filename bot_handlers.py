@@ -117,6 +117,16 @@ async def message_callback(event: MessageCallback):
         # --- Visit Doctor Module ---
         if payload == 'start_visit_doctor':
             log_user_event(user_id, "visit_doctor_start")
+            if not db.is_user_registered(user_id):
+                keyboard = create_keyboard([[
+                    {'type': 'callback', 'text': 'Начать регистрацию', 'payload': "start_continue"}
+                ]])
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Для записи к врачу необходимо сначала зарегистрироваться.",
+                    attachments=[keyboard] if keyboard else []
+                )
+                return
             await start_booking(event.bot, user_id, chat_id)
             return
             
@@ -131,6 +141,9 @@ async def message_callback(event: MessageCallback):
 
         # Обработка callback-ов для записей к врачу
         if payload.startswith("view_appointment:"):
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для доступа к записям необходима регистрация.")
+                return
             try:
                 appointment_id = int(payload.split(":")[1])
                 log_user_event(user_id, "appointment_details_viewed", appointment_id=appointment_id)
@@ -151,6 +164,9 @@ async def message_callback(event: MessageCallback):
 
         elif payload == "view_appointments_list":
             log_user_event(user_id, "appointments_list_viewed")
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для доступа к записям необходима регистрация.")
+                return
             if sync_service and sync_service.notifier:
                 await sync_service.notifier.send_appointments_list(user_id)
             else:
@@ -162,6 +178,10 @@ async def message_callback(event: MessageCallback):
 
         elif payload.startswith("cancel_appointment:"):
             # Обработка отмены записи
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для отмены записей необходима регистрация.")
+                return
+            
             if payload == "cancel_appointment:stub":
                 await event.bot.send_message(
                     chat_id=chat_id,
@@ -268,6 +288,10 @@ async def message_callback(event: MessageCallback):
         
         elif payload.startswith("cancel_appointment_confirm:"):
             # Подтверждение отмены записи
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для отмены записей необходима регистрация.")
+                return
+            
             try:
                 appointment_id = int(payload.split(":")[1])
             except (ValueError, IndexError):
@@ -537,21 +561,33 @@ async def message_callback(event: MessageCallback):
         # Управление напоминаниями
         elif payload == "reminders_settings":
             log_user_event(user_id, "reminders_settings_opened")
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для доступа к настройкам необходима регистрация.")
+                return
             await reminder_handler.send_reminder_settings(event.bot, user_id, chat_id)
             return
 
         elif payload == "reminders_yes":
             log_user_event(user_id, "reminders_enabled")
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для доступа к настройкам необходима регистрация.")
+                return
             await reminder_handler.enable_reminders(event.bot, user_id, chat_id)
             return
 
         elif payload == "reminders_no":
             log_user_event(user_id, "reminders_disabled")
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для доступа к настройкам необходима регистрация.")
+                return
             await reminder_handler.disable_reminders(event.bot, user_id, chat_id)
             return
 
         elif payload == "reminders_back":
             log_user_event(user_id, "reminders_back_clicked")
+            if not db.is_user_registered(user_id):
+                await event.bot.send_message(chat_id=chat_id, text="❌ Для доступа к настройкам необходима регистрация.")
+                return
             await reminder_handler.go_back(event.bot, user_id, chat_id)
             return
 

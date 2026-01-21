@@ -531,7 +531,8 @@ async def message_callback(event: MessageCallback):
                 await send_main_menu(event.bot, chat_id, greeting_name)
             else:
                 await send_welcome_message(event.bot, chat_id)
-
+            
+            return
 
         # Управление напоминаниями
         elif payload == "reminders_settings":

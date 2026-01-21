@@ -8,6 +8,9 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
+from maxapi.types import Attachment, CallbackButton, ButtonsPayload
+from maxapi.utils.inline_keyboard import AttachmentType
+
 from logging_config import log_system_event, log_security_event
 from tmk.models import (
     TelemedCreateRequest,
@@ -106,7 +109,25 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
         )
         
         try:
-            # 1. Создание чата через MAX API
+            # 1. Проверка на существование сессии с таким external_id
+            existing_session = tmk_db.get_session_by_external_id(request.externalId)
+            
+            if existing_session:
+                log_system_event(
+                    "tmk_api",
+                    "duplicate_external_id",
+                    external_id=request.externalId,
+                    existing_session_id=str(existing_session['id'])
+                )
+                return TelemedCreateResponse(
+                    status="error",
+                    id=str(existing_session['id']),
+                    externalId=request.externalId,
+                    message="Чат с указанным externalId уже существует.",
+                    error="Duplicate external_id"
+                )
+            
+            # 2. Создание чата через MAX API
             doctor_fio = request.doctor.get_full_name()
             patient_fio = request.patient.get_full_name()
             
@@ -124,18 +145,19 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                 return TelemedCreateResponse(
                     status="error",
                     id="",
+                    externalId=request.externalId,
                     message="Не удалось создать чат после 3 попыток",
                     error="MAX API error"
                 )
             
-            # 2. Парсинг даты консультации
+            # 3. Парсинг даты консультации
             schedule_date = parse_datetime_with_tz(request.scheduleDate)
             
-            # 3. Расчёт времени напоминаний
+            # 4. Расчёт времени напоминаний
             reminder_24h_at = schedule_date - timedelta(hours=24)
             reminder_15m_at = schedule_date - timedelta(minutes=15)
             
-            # 4. Поиск пациента по телефону
+            # 5. Поиск пациента по телефону
             patient_phone = normalize_phone(
                 request.patient.phone if request.patient.phone else ""
             )
@@ -168,7 +190,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                         phone=patient_phone
                     )
             
-            # 5. Подготовка данных для БД
+            # 6. Подготовка данных для БД
             session_data = {
                 "external_id": request.externalId,
                 "user_id": user_id,
@@ -196,7 +218,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                 "reminder_15m_at": reminder_15m_at
             }
             
-            # 6. Сохранение в БД
+            # 7. Сохранение в БД
             session_id = tmk_db.create_session(session_data)
             
             if not session_id:
@@ -208,11 +230,12 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                 return TelemedCreateResponse(
                     status="error",
                     id="",
+                    externalId=request.externalId,
                     message="Ошибка при сохранении в БД",
                     error="Database error"
                 )
             
-            # 7. Добавление напоминаний в очередь
+            # 8. Добавление напоминаний в очередь
             now = datetime.now(MOSCOW_TZ)
             
             if reminder_24h_at > now:
@@ -221,7 +244,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             if reminder_15m_at > now:
                 await reminder_service.add_reminder(session_id, '15m', reminder_15m_at)
             
-            # 8. Отправка первого сообщения пациенту (если найден)
+            # 9. Отправка первого сообщения пациенту (если найден)
             if user_id:
                 session = tmk_db.get_session_by_id(session_id)
                 await reminder_service.send_initial_message(user_id, session)
@@ -233,7 +256,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     user_id=user_id
                 )
             
-            # 9. Возврат ответа в МИС
+            # 10. Возврат ответа в МИС
             log_system_event(
                 "tmk_api",
                 "session_created_successfully",
@@ -245,6 +268,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             return TelemedCreateResponse(
                 status="success",
                 id=session_id,
+                externalId=request.externalId,
                 chat_invite_link=chat_data["invite_link"],
                 message="Консультация создана"
             )
@@ -260,6 +284,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             return TelemedCreateResponse(
                 status="error",
                 id="",
+                externalId=request.externalId,
                 message="Внутренняя ошибка сервера",
                 error=str(e)
             )
@@ -302,6 +327,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                 return TelemedUpdateResponse(
                     status="error",
                     id="",
+                    externalId=external_id,
                     message="Консультация не найдена",
                     error="Session not found"
                 )
@@ -320,6 +346,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                 return TelemedUpdateResponse(
                     status="error",
                     id=session_id,
+                    externalId=external_id,
                     message="Ошибка при обновлении статуса",
                     error="Database error"
                 )
@@ -328,12 +355,21 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             if request.status.value == "CANCELLED" and session['user_id']:
                 message_text = build_cancellation_message(session)
                 
+                # Создаем кнопку "Главное меню"
+                main_menu_button = CallbackButton(text="Главное меню", payload="main_menu")
+                buttons_payload = ButtonsPayload(buttons=[[main_menu_button]])
+                keyboard = Attachment(
+                    type=AttachmentType.INLINE_KEYBOARD,
+                    payload=buttons_payload
+                )
+                
                 # Получаем chat_id пользователя
                 chat_id = user_db.get_last_chat_id(session['user_id'])
                 if chat_id:
                     await bot_instance.send_message(
                         chat_id=chat_id,
-                        text=message_text
+                        text=message_text,
+                        attachments=[keyboard]
                     )
                 
                 log_system_event(
@@ -355,6 +391,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             return TelemedUpdateResponse(
                 status="success",
                 id=session_id,
+                externalId=external_id,
                 message=f"Статус обновлён на {request.status.value}"
             )
         
@@ -369,6 +406,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             return TelemedUpdateResponse(
                 status="error",
                 id="",
+                externalId=external_id,
                 message="Внутренняя ошибка сервера",
                 error=str(e)
             )

@@ -170,6 +170,8 @@ def build_cancellation_message(session: Dict[str, Any]) -> str:
 МО: {session['clinic_name']}
 Врач: {session['doctor_fio']}
 Дата: {date_str}
-Время: {time_str} (Московское время)"""
+Время: {time_str} (Московское время)
+
+Уточнить причину отмены можно в регистратуре мед организации."""
     
     return message

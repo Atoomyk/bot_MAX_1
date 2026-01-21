@@ -7,7 +7,9 @@ Soglasie.txt
 USER_GUIDE.md
 PROJECT_STRUCTURE.md
 
-#*.md
+#tmk/*.md
+
+
 # Logs
 *.log
 logs/

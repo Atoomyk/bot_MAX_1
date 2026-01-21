@@ -98,6 +98,7 @@ class TelemedCreateResponse(BaseModel):
     """Ответ на создание ТМК"""
     status: str = Field(..., description="Статус операции (success/error)")
     id: str = Field(..., description="Внутренний ID сессии ТМК")
+    externalId: str = Field(..., description="Внешний ID консультации из МИС")
     chat_invite_link: Optional[str] = Field(None, description="Ссылка на чат")
     message: str = Field(..., description="Сообщение о результате")
     error: Optional[str] = Field(None, description="Описание ошибки")
@@ -107,6 +108,7 @@ class TelemedUpdateResponse(BaseModel):
     """Ответ на обновление ТМК"""
     status: str = Field(..., description="Статус операции (success/error)")
     id: str = Field(..., description="ID сессии ТМК")
+    externalId: str = Field(..., description="Внешний ID консультации из МИС")
     message: str = Field(..., description="Сообщение о результате")
     error: Optional[str] = Field(None, description="Описание ошибки")
 

@@ -4,7 +4,7 @@ import asyncio
 
 from bot_config import (
     bot, dp, WEBHOOK_MODE, WEBHOOK_PORT,
-    init_sync_service, reminder_handler
+    init_sync_service, init_tmk_service, reminder_handler
 )
 import bot_config
 # Импортируем обработчики для регистрации
@@ -22,7 +22,7 @@ reminder_handler.send_other_options_menu = send_other_options_menu
 
 async def main():
     """Главная функция запуска бота"""
-    global keepalive_task, chat_cleanup_task, booking_cleanup_task
+    global keepalive_task, chat_cleanup_task, booking_cleanup_task, tmk_server_task, tmk_reminder_task
 
     log_system_event("bot", "starting", webhook_mode=WEBHOOK_MODE, port=WEBHOOK_PORT)
 
@@ -38,6 +38,33 @@ async def main():
             log_system_event("sync", "scheduler_failed")
     else:
         log_system_event("sync", "scheduler_skipped", reason="Service not initialized")
+    
+    # Инициализация сервиса ТМК
+    init_tmk_service()
+    
+    # Сохранение ссылок на ТМК компоненты для обработчиков
+    if bot_config.tmk_database:
+        bot_config.tmk_bot = bot
+        log_system_event("tmk", "handlers_ready")
+    
+    # Запуск сервиса напоминаний ТМК
+    if bot_config.tmk_reminder_service:
+        tmk_reminder_task = asyncio.create_task(bot_config.tmk_reminder_service.start())
+        log_system_event("tmk", "reminder_service_started")
+    
+    # Запуск FastAPI сервера для МИС API
+    tmk_server_task = None
+    if bot_config.tmk_app:
+        import uvicorn
+        uvicorn_config = uvicorn.Config(
+            bot_config.tmk_app,
+            host="0.0.0.0",
+            port=bot_config.MIS_API_PORT,
+            log_level="info"
+        )
+        tmk_server = uvicorn.Server(uvicorn_config)
+        tmk_server_task = asyncio.create_task(tmk_server.serve())
+        log_system_event("tmk", "api_server_started", port=bot_config.MIS_API_PORT)
 
     # Запускаем фоновые задачи
     keepalive_task = asyncio.create_task(keepalive_worker())
@@ -85,6 +112,20 @@ async def main():
         # Останавливаем планировщик синхронизации
         if bot_config.scheduler_manager:
             await bot_config.scheduler_manager.wait_for_scheduler()
+        
+        # Останавливаем сервис напоминаний ТМК
+        if bot_config.tmk_reminder_service:
+            await bot_config.tmk_reminder_service.stop()
+            log_system_event("tmk", "reminder_service_stopped")
+        
+        # Останавливаем FastAPI сервер ТМК
+        if tmk_server_task:
+            tmk_server_task.cancel()
+            try:
+                await tmk_server_task
+            except asyncio.CancelledError:
+                pass
+            log_system_event("tmk", "api_server_stopped")
 
 
 if __name__ == "__main__":

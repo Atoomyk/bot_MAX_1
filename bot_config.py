@@ -42,6 +42,12 @@ if ADMIN_ID:
 # URL внешней системы МИС
 MIS_API_URL = os.getenv("MIS_API_URL")
 
+# Настройки для ТМК интеграции
+MIS_API_TOKEN = os.getenv("MIS_API_TOKEN")
+MIS_CALLBACK_URL = os.getenv("MIS_CALLBACK_URL")
+SFERUM_ACCESS_TOKEN = os.getenv("SFERUM_ACCESS_TOKEN")
+MIS_API_PORT = int(os.getenv("MIS_API_PORT", "8085"))
+
 # Определение URL вебхука
 if WEBHOOK_MODE == "direct" and DIRECT_WEBHOOK_URL:
     WEBHOOK_URL = DIRECT_WEBHOOK_URL
@@ -79,6 +85,12 @@ sync_service: Optional[SyncService] = None
 sync_command_handler: Optional[SyncCommandHandler] = None
 scheduler_manager: Optional[SchedulerManager] = None
 
+# Глобальные переменные для ТМК
+tmk_database = None
+tmk_reminder_service = None
+tmk_app = None
+tmk_bot = None
+
 
 def init_sync_service():
     """Инициализирует сервис синхронизации записей"""
@@ -99,6 +111,31 @@ def init_sync_service():
             log_system_event("sync", "init_skipped", reason=reason.strip())
     except Exception as e:
         log_system_event("sync", "init_error", error=str(e))
+
+
+def init_tmk_service():
+    """Инициализирует сервис телемедицинских консультаций"""
+    global tmk_database, tmk_reminder_service, tmk_app
+    
+    try:
+        from tmk.database import TelemedDatabase
+        from tmk.reminder_service import ReminderService
+        from tmk.api import create_tmk_app
+        
+        # Инициализация базы данных ТМК
+        tmk_database = TelemedDatabase(db.conn)
+        log_system_event("tmk", "database_initialized")
+        
+        # Инициализация сервиса напоминаний
+        tmk_reminder_service = ReminderService(bot, tmk_database)
+        log_system_event("tmk", "reminder_service_initialized")
+        
+        # Создание FastAPI приложения
+        tmk_app = create_tmk_app(bot, tmk_database, tmk_reminder_service)
+        log_system_event("tmk", "api_initialized", port=MIS_API_PORT)
+        
+    except Exception as e:
+        log_system_event("tmk", "init_error", error=str(e))
 
 
 # Инициализация обработчиков

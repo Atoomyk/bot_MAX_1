@@ -105,6 +105,15 @@ async def message_callback(event: MessageCallback):
 
         payload = event.callback.payload
 
+        # --- ТМК Module ---
+        if payload.startswith('tmk_consent_'):
+            from bot_config import tmk_database, tmk_bot
+            if tmk_database and tmk_bot:
+                from tmk.handlers import handle_tmk_consent
+                handled = await handle_tmk_consent(event, tmk_bot, tmk_database)
+                if handled:
+                    return
+        
         # --- Visit Doctor Module ---
         if payload == 'start_visit_doctor':
             log_user_event(user_id, "visit_doctor_start")
@@ -510,7 +519,7 @@ async def message_callback(event: MessageCallback):
             log_user_event(user_id, "other_options_menu_opened")
             await send_other_options_menu(event.bot, chat_id)
 
-        elif payload == "back_to_main":
+        elif payload == "back_to_main" or payload == "main_menu":
             log_user_event(user_id, "back_to_main_menu")
             
             # Сбрасываем контекст записи к врачу

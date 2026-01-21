@@ -144,32 +144,68 @@ class UserDatabase:
             );
             """,
             
-            # 2. Таблица для телемедицинских консультаций
+            # 2. Таблица для телемедицинских консультаций (интеграция с МИС)
             """
             CREATE TABLE IF NOT EXISTS telemed_sessions (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                doctor_name TEXT,
-                specialty TEXT,
-                scheduled_start TIMESTAMP,      -- Плановое начало
-                scheduled_end TIMESTAMP,        -- Плановое окончание
-                actual_start TIMESTAMP,         -- Фактическое начало
-                actual_end TIMESTAMP,           -- Фактическое окончание
-                conference_link TEXT,           -- Ссылка на видеочат
-                status VARCHAR(50),             -- scheduled, active, completed, canceled
-                platform VARCHAR(50),           -- zoom, jazz, trueconf, internal
+                -- Основные идентификаторы
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                external_id VARCHAR(255) UNIQUE NOT NULL,
                 
-                -- Поля с запасом
-                doctor_id VARCHAR(50),          -- Внешний ID врача
-                medical_report TEXT,            -- Заключение (кратко)
-                patient_complaints TEXT,        -- Жалобы
-                cost NUMERIC(10,2),             -- Стоимость, если платно
-                rating INT,                     -- Оценка от пациента
+                -- Данные пациента
+                user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+                patient_phone VARCHAR(20) NOT NULL,
+                patient_fio VARCHAR(255) NOT NULL,
+                patient_snils VARCHAR(14),
+                patient_oms_number VARCHAR(16),
+                patient_oms_series VARCHAR(10),
+                patient_birth_date DATE,
+                patient_sex VARCHAR(1),
                 
-                CONSTRAINT fk_telemed_user 
-                    FOREIGN KEY (user_id) 
-                    REFERENCES users(user_id)
+                -- Данные врача
+                doctor_fio VARCHAR(255) NOT NULL,
+                doctor_snils VARCHAR(14),
+                doctor_specialization VARCHAR(255),
+                doctor_position VARCHAR(255),
+                
+                -- Данные клиники
+                clinic_name VARCHAR(255),
+                clinic_address VARCHAR(500),
+                clinic_mo_oid VARCHAR(255),
+                clinic_phone VARCHAR(20),
+                
+                -- Данные консультации
+                schedule_date TIMESTAMPTZ NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                pay_method VARCHAR(20),
+                
+                -- MAX чат
+                chat_id BIGINT,
+                chat_invite_link TEXT,
+                
+                -- Напоминания
+                reminder_24h_at TIMESTAMPTZ,
+                reminder_15m_at TIMESTAMPTZ,
+                reminder_24h_sent_at TIMESTAMPTZ,
+                reminder_15m_sent_at TIMESTAMPTZ,
+                
+                -- Согласие пациента
+                consent_at TIMESTAMPTZ,
+                consent_message_id BIGINT,
+                
+                -- Метаданные
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
             );
+            """,
+            
+            # 2.1 Индексы для telemed_sessions
+            """
+            CREATE INDEX IF NOT EXISTS idx_telemed_external_id ON telemed_sessions(external_id);
+            CREATE INDEX IF NOT EXISTS idx_telemed_user_id ON telemed_sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_telemed_schedule_date ON telemed_sessions(schedule_date);
+            CREATE INDEX IF NOT EXISTS idx_telemed_status ON telemed_sessions(status);
+            CREATE INDEX IF NOT EXISTS idx_telemed_reminder_24h ON telemed_sessions(reminder_24h_at, reminder_24h_sent_at);
+            CREATE INDEX IF NOT EXISTS idx_telemed_reminder_15m ON telemed_sessions(reminder_15m_at, reminder_15m_sent_at);
             """,
 
             # 3. Таблица направлений
@@ -315,6 +351,28 @@ class UserDatabase:
             return None
         except psycopg2.Error as e:
             log_system_event("database", "get_user_full_data_error", error=str(e), user_id=user_id)
+            return None
+
+    def get_user_by_phone(self, phone: str):
+        """
+        Поиск пользователя по номеру телефона (для ТМК)
+        Возвращает dict {user_id, fio, phone} или None
+        """
+        try:
+            self.cursor.execute(
+                "SELECT user_id, fio, phone FROM users WHERE phone = %s",
+                (phone,)
+            )
+            row = self.cursor.fetchone()
+            if row:
+                return {
+                    'user_id': row[0],
+                    'fio': row[1],
+                    'phone': row[2]
+                }
+            return None
+        except psycopg2.Error as e:
+            log_system_event("database", "get_user_by_phone_error", error=str(e), phone=phone)
             return None
 
     # ---------------------------------------------------------------------

@@ -90,33 +90,55 @@ def create_keyboard(buttons_config):
     if not buttons_config:
         return None
 
-    formatted_buttons = []
-    for row in buttons_config:
-        button_row = []
-        for button in row:
-            if isinstance(button, dict):
-                if button.get('type') == 'callback':
-                    btn = CallbackButton(text=button['text'], payload=button['payload'])
-                elif button.get('type') == 'link':
-                    btn = LinkButton(text=button['text'], url=button['url'])
-                elif button.get('type') == 'contact':
-                    btn = RequestContactButton(text=button['text'])
+    try:
+        formatted_buttons = []
+        for row in buttons_config:
+            if not row:  # Пропускаем пустые строки
+                continue
+                
+            button_row = []
+            for button in row:
+                if isinstance(button, dict):
+                    # Проверяем наличие обязательных полей
+                    if button.get('type') == 'callback':
+                        if not button.get('text') or not button.get('payload'):
+                            continue
+                        btn = CallbackButton(text=button['text'], payload=button['payload'])
+                    elif button.get('type') == 'link':
+                        if not button.get('text') or not button.get('url'):
+                            continue
+                        btn = LinkButton(text=button['text'], url=button['url'])
+                    elif button.get('type') == 'contact':
+                        if not button.get('text'):
+                            continue
+                        btn = RequestContactButton(text=button['text'])
+                    else:
+                        continue
+                    button_row.append(btn)
                 else:
-                    continue
-                button_row.append(btn)
-            else:
-                button_row.append(button)
-        if button_row:
-            formatted_buttons.append(button_row)
+                    # Если это уже готовый объект кнопки (CallbackButton, LinkButton и т.д.)
+                    button_row.append(button)
+            
+            if button_row:
+                formatted_buttons.append(button_row)
 
-    if not formatted_buttons:
+        if not formatted_buttons:
+            return None
+
+        buttons_payload = ButtonsPayload(buttons=formatted_buttons)
+        
+        # Проверяем, что payload создан успешно
+        if not buttons_payload:
+            return None
+            
+        return Attachment(
+            type=AttachmentType.INLINE_KEYBOARD,
+            payload=buttons_payload
+        )
+    except Exception as e:
+        # Логируем ошибку создания клавиатуры
+        log_system_event("keyboard_creation", "error", error=str(e))
         return None
-
-    buttons_payload = ButtonsPayload(buttons=formatted_buttons)
-    return Attachment(
-        type=AttachmentType.INLINE_KEYBOARD,
-        payload=buttons_payload
-    )
 
 
 # --- ФУНКЦИИ УПРАВЛЕНИЯ ВЕБХУКАМИ ---

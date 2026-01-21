@@ -150,10 +150,19 @@ async def show_patient_confirmation(bot, user_id, chat_id, ctx):
     is_self_booking = getattr(ctx, 'selected_person', '') == 'me'
     is_from_rms = getattr(ctx, 'is_from_rms', False)
     
+    keyboard = kb.kb_confirm_patient_data(is_self_booking=is_self_booking, allow_edit=not is_from_rms)
+    if not keyboard:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Ошибка создания клавиатуры подтверждения данных. Пожалуйста, начните запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        return
+    
     await bot.send_message(
         chat_id=chat_id,
         text=summary,
-        attachments=[kb.kb_confirm_patient_data(is_self_booking=is_self_booking, allow_edit=not is_from_rms)]
+        attachments=[keyboard]
     )
 
 async def start_booking(bot, user_id, chat_id):
@@ -164,14 +173,32 @@ async def start_booking(bot, user_id, chat_id):
     
     ctx.step = "PERSON"
     ctx.update_activity()  # Обновляем активность при старте
+    
+    keyboard = kb.kb_person_selection()
+    if not keyboard:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Ошибка создания клавиатуры. Пожалуйста, попробуйте позже."
+        )
+        return
+    
     await bot.send_message(
         chat_id=chat_id,
         text="Кого записать на прием?",
-        attachments=[kb.kb_person_selection()]
+        attachments=[keyboard]
     )
 
 async def send_mo_selection_menu(bot, chat_id, mos, ctx):
     """(Helper) Отправляет меню выбора МО с нумерацией"""
+    
+    # Проверка на пустой список МО
+    if not mos:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Не удалось загрузить список медицинских организаций. Пожалуйста, начните запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        return
     
     menu_text = "🏥 Выберите медицинскую организацию:\n\n"
     # import re - Removed, using global import
@@ -205,10 +232,21 @@ async def send_mo_selection_menu(bot, chat_id, mos, ctx):
         menu_text += f"{i + 1}. {display_str}\n\n"
 
     ctx.step = "MO"
+    keyboard = kb.kb_mo_selection(mos)
+    
+    # Дополнительная проверка на случай, если клавиатура не создалась
+    if not keyboard:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Ошибка создания клавиатуры. Пожалуйста, начните запись заново.",
+            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+        )
+        return
+    
     await bot.send_message(
         chat_id=chat_id,
         text=menu_text,
-        attachments=[kb.kb_mo_selection(mos)]
+        attachments=[keyboard]
     )
 
 async def process_mo_selection(bot, user_id, chat_id, ctx):
@@ -253,17 +291,37 @@ async def handle_callback(bot, user_id, chat_id, payload):
     # --- НАВИГАЦИЯ НАЗАД ---
     if payload == 'doc_back_to_person':
         ctx.step = "PERSON"
-        await bot.send_message(chat_id=chat_id, text="Кого записать на прием?", attachments=[kb.kb_person_selection()])
+        keyboard = kb.kb_person_selection()
+        
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text="Кого записать на прием?", attachments=[keyboard])
         return
     elif payload == 'doc_back_to_mo':
         mos = cache.get('mos', [])
         if not mos: # Ре-фетч если кэш пропал
-             await process_mo_selection(bot, user_id, chat_id, ctx)
-             return
+            await process_mo_selection(bot, user_id, chat_id, ctx)
+            return
         await send_mo_selection_menu(bot, chat_id, mos, ctx)
         return
     elif payload == 'doc_back_to_spec':
         specs = cache.get('specs', [])
+        
+        # Проверка на пустой список специальностей
+        if not specs:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Не удалось загрузить список специальностей. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
         ctx.step = "SPEC"
         
         # Get MO Name for display
@@ -272,18 +330,67 @@ async def handle_callback(bot, user_id, chat_id, payload):
         from visit_a_doctor.specialties_MO import Abbreviations_MO
         short_mo_name = Abbreviations_MO.get(mo_name, mo_name)
         
-        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность:", attachments=[kb.kb_spec_selection(specs, ctx.spec_page)])
+        keyboard = kb.kb_spec_selection(specs, ctx.spec_page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность:", attachments=[keyboard])
         return
     elif payload == 'doc_back_to_doc':
         doctors = cache.get('doctors', [])
+        
+        # Проверка на пустой список врачей
+        if not doctors:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Не удалось загрузить список врачей. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
         ctx.step = "DOCTOR"
         spec_name = ctx.selected_spec
-        await bot.send_message(chat_id=chat_id, text=f"Выберите врача ({spec_name}):", attachments=[kb.kb_doctor_selection(doctors)])
+        keyboard = kb.kb_doctor_selection(doctors)
+        
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"Выберите врача ({spec_name}):", attachments=[keyboard])
         return
     elif payload == 'doc_back_to_date':
         dates = ctx.available_dates_cache or []
+        
+        # Проверка на пустой список дат
+        if not dates:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Не удалось загрузить список дат. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
         ctx.step = "DATE"
-        await bot.send_message(chat_id=chat_id, text="Выберите дату приема:", attachments=[kb.kb_date_selection(dates, ctx.date_page)])
+        keyboard = kb.kb_date_selection(dates, ctx.date_page)
+        
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text="Выберите дату приема:", attachments=[keyboard])
         return
 
     # --- РЕДАКТИРОВАНИЕ ДАННЫХ ПАЦИЕНТА ---
@@ -311,9 +418,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
     if payload == "doc_edit_gender": 
         ctx.step = "ENTER_GENDER"
         ctx.return_to_confirm = True
-        ctx.step = "ENTER_GENDER"
-        ctx.return_to_confirm = True
-        await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
+        keyboard = kb.kb_gender_selection()
+        
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры выбора пола. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[keyboard])
         return
         
     if payload == "doc_edit_snils": 
@@ -419,6 +534,14 @@ async def handle_callback(bot, user_id, chat_id, payload):
                     keyboard_rows.append([{'type': 'callback', 'text': '➕ Ввести вручную', 'payload': "doc_other_select_manual"}])
                     keyboard = kb.create_keyboard(keyboard_rows)
                     
+                    if not keyboard:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ Ошибка создания клавиатуры выбора пациента. Пожалуйста, начните запись заново.",
+                            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+                        )
+                        return
+                    
                     await bot.send_message(
                         chat_id=chat_id,
                         text="📋 Выберите пациента из списка или введите данные вручную:",
@@ -509,7 +632,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
                 if not ctx.patient_gender:
                     ctx.step = "ENTER_GENDER"
                     ctx.return_to_confirm = False
-                    await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
+                    keyboard = kb.kb_gender_selection()
+                    
+                    if not keyboard:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ Ошибка создания клавиатуры выбора пола. Пожалуйста, начните запись заново.",
+                            attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+                        )
+                        return
+                    
+                    await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[keyboard])
                 elif not ctx.patient_snils:
                     ctx.step = "ENTER_SNILS"
                     ctx.return_to_confirm = False
@@ -566,7 +699,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
             else:
                 ctx.step = "ENTER_GENDER"
                 ctx.return_to_confirm = False
-                await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[kb.kb_gender_selection()])
+                keyboard = kb.kb_gender_selection()
+                
+                if not keyboard:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="⚠️ Ошибка создания клавиатуры выбора пола. Пожалуйста, начните запись заново.",
+                        attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+                    )
+                    return
+                
+                await bot.send_message(chat_id=chat_id, text="Выберите пол:", attachments=[keyboard])
             
         except (ValueError, IndexError):
                 await bot.send_message(chat_id=chat_id, text="⚠ Ошибка выбора. Введите данные вручную.")
@@ -656,7 +799,16 @@ async def handle_callback(bot, user_id, chat_id, payload):
         from visit_a_doctor.specialties_MO import Abbreviations_MO
         short_mo_name = Abbreviations_MO.get(mo_name, mo_name)
         
-        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность:", attachments=[kb.kb_spec_selection(specs_ui, ctx.spec_page)])
+        keyboard = kb.kb_spec_selection(specs_ui, ctx.spec_page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры специальностей. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность:", attachments=[keyboard])
         return
 
     # 3. Выбор специальности
@@ -671,7 +823,16 @@ async def handle_callback(bot, user_id, chat_id, payload):
         from visit_a_doctor.specialties_MO import Abbreviations_MO
         short_mo_name = Abbreviations_MO.get(mo_name, mo_name)
         
-        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность (стр. {page+1}):", attachments=[kb.kb_spec_selection(specs, page)])
+        keyboard = kb.kb_spec_selection(specs, page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры специальностей. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"🏥 {short_mo_name}\n\nВыберите специальность (стр. {page+1}):", attachments=[keyboard])
         return
         
     if payload.startswith('doc_spec_'):
@@ -708,7 +869,16 @@ async def handle_callback(bot, user_id, chat_id, payload):
         if has_rooms:
             selection_text = f"Выберите врача или кабинет ({ctx.selected_spec}):"
         
-        await bot.send_message(chat_id=chat_id, text=selection_text, attachments=[kb.kb_doctor_selection(doctors)])
+        keyboard = kb.kb_doctor_selection(doctors)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры врачей. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=selection_text, attachments=[keyboard])
         return
 
     # 4. Выбор врача
@@ -734,7 +904,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
             
         ctx.step = "DATE"
         ctx.date_page = 0
-        await bot.send_message(chat_id=chat_id, text="Выберите дату приема:", attachments=[kb.kb_date_selection(ctx.available_dates_cache, ctx.date_page)])
+        
+        keyboard = kb.kb_date_selection(ctx.available_dates_cache, ctx.date_page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры дат. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text="Выберите дату приема:", attachments=[keyboard])
         return
 
     # 5. Выбор даты
@@ -742,7 +922,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
         page = int(payload.split('_')[-1])
         ctx.date_page = page
         dates = ctx.available_dates_cache or []
-        await bot.send_message(chat_id=chat_id, text=f"Выберите дату приема (стр. {page+1}):", attachments=[kb.kb_date_selection(dates, page)])
+        
+        keyboard = kb.kb_date_selection(dates, page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры дат. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"Выберите дату приема (стр. {page+1}):", attachments=[keyboard])
         return
         
     if payload.startswith('doc_date_'):
@@ -781,7 +971,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
         cache['slots'] = slots
         ctx.step = "TIME"
         ctx.time_page = 0
-        await bot.send_message(chat_id=chat_id, text=f"Выберите время приема на {date_str}:", attachments=[kb.kb_time_selection(slots, ctx.time_page)])
+        
+        keyboard = kb.kb_time_selection(slots, ctx.time_page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры времени. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"Выберите время приема на {date_str}:", attachments=[keyboard])
         return
 
     # 6. Выбор времени
@@ -789,7 +989,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
         page = int(payload.split('_')[-1])
         ctx.time_page = page
         slots = cache.get('slots', [])
-        await bot.send_message(chat_id=chat_id, text=f"Выберите время приема (стр. {page+1}):", attachments=[kb.kb_time_selection(slots, page)])
+        
+        keyboard = kb.kb_time_selection(slots, page)
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры времени. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=f"Выберите время приема (стр. {page+1}):", attachments=[keyboard])
         return
         
     if payload.startswith('doc_time_'):
@@ -836,7 +1046,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
             f"👤 Тип записи: {person_info}\n\n"
             f"Все верно?"
         )
-        await bot.send_message(chat_id=chat_id, text=confirm_text, attachments=[kb.kb_confirm_appointment()])
+        
+        keyboard = kb.kb_confirm_appointment()
+        if not keyboard:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Ошибка создания клавиатуры подтверждения. Пожалуйста, начните запись заново.",
+                attachments=[kb.create_keyboard([[{'type': 'callback', 'text': '🔄 Начать сначала', 'payload': 'doc_restart'}]])]
+            )
+            return
+        
+        await bot.send_message(chat_id=chat_id, text=confirm_text, attachments=[keyboard])
         return
 
     # ФИНАЛ
@@ -906,9 +1126,17 @@ async def handle_callback(bot, user_id, chat_id, payload):
             except Exception as e:
                 print(f"DB SAVE ERROR: {e}") # Non-blocking error logging
 
-            await bot.send_message(chat_id=chat_id, text=summary, attachments=[kb.kb_final_menu()])
+            keyboard = kb.kb_final_menu()
+            if not keyboard:
+                await bot.send_message(chat_id=chat_id, text=summary)
+            else:
+                await bot.send_message(chat_id=chat_id, text=summary, attachments=[keyboard])
         else:
-            await bot.send_message(chat_id=chat_id, text="❌ Ошибка при создании записи. Возможно слот уже занят.", attachments=[kb.kb_final_menu()])
+            keyboard = kb.kb_final_menu()
+            if not keyboard:
+                await bot.send_message(chat_id=chat_id, text="❌ Ошибка при создании записи. Возможно слот уже занят.")
+            else:
+                await bot.send_message(chat_id=chat_id, text="❌ Ошибка при создании записи. Возможно слот уже занят.", attachments=[keyboard])
             
         if user_id in user_states:
              del user_states[user_id]

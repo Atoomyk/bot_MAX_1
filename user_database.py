@@ -198,15 +198,9 @@ class UserDatabase:
             );
             """,
             
-            # 2.1 Индексы для telemed_sessions
-            """
-            CREATE INDEX IF NOT EXISTS idx_telemed_external_id ON telemed_sessions(external_id);
-            CREATE INDEX IF NOT EXISTS idx_telemed_user_id ON telemed_sessions(user_id);
-            CREATE INDEX IF NOT EXISTS idx_telemed_schedule_date ON telemed_sessions(schedule_date);
-            CREATE INDEX IF NOT EXISTS idx_telemed_status ON telemed_sessions(status);
-            CREATE INDEX IF NOT EXISTS idx_telemed_reminder_24h ON telemed_sessions(reminder_24h_at, reminder_24h_sent_at);
-            CREATE INDEX IF NOT EXISTS idx_telemed_reminder_15m ON telemed_sessions(reminder_15m_at, reminder_15m_sent_at);
-            """,
+            # 2.1 Индексы для telemed_sessions (создаются в tmk/database.py, здесь пропускаем)
+            # Индексы создаются автоматически при инициализации ТМК модуля
+            # Если создать их здесь, будет ошибка если таблица ещё не существует
 
             # 3. Таблица направлений
             """
@@ -253,7 +247,9 @@ class UserDatabase:
 
         try:
             for q in queries:
-                self.cursor.execute(q)
+                # Пропускаем пустые запросы
+                if q and q.strip():
+                    self.cursor.execute(q)
             self.conn.commit()
             
             # --- Миграция таблицы appointments ---
@@ -478,10 +474,6 @@ class UserDatabase:
             log_system_event("database", "column_add_error", error=str(e), column=column_name, table=table_name)
             if self.conn:
                 self.conn.rollback()
-        except psycopg2.Error as e:
-            log_system_event("database", "users_column_add_error", error=str(e), column=column_name)
-            if self.conn:
-                self.conn.rollback()
 
     # ----- Оригинальные методы регистрации/валидации (не менялись) -----
 
@@ -490,7 +482,22 @@ class UserDatabase:
             self.cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
             return self.cursor.fetchone() is not None
         except psycopg2.Error as e:
-            log_system_event("database", "query_failed", error=str(e), user_id=user_id)
+            error_msg = str(e)
+            log_system_event("database", "query_failed", error=error_msg, user_id=user_id)
+            
+            # Если транзакция прервана - делаем rollback и повторяем запрос
+            if "текущая транзакция прервана" in error_msg or "current transaction is aborted" in error_msg.lower():
+                try:
+                    self.conn.rollback()
+                    # Повторяем запрос после rollback
+                    self.cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+                    result = self.cursor.fetchone() is not None
+                    log_system_event("database", "query_retry_success", user_id=user_id)
+                    return result
+                except Exception as retry_error:
+                    log_system_event("database", "query_retry_failed", error=str(retry_error), user_id=user_id)
+                    return False
+            
             return False
 
     def get_user_greeting(self, user_id: int) -> str:

@@ -25,6 +25,7 @@ class TelemedDatabase:
         """Создание таблицы telemed_sessions если не существует"""
         try:
             with self.conn.cursor() as cursor:
+                # Создаём таблицу
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS telemed_sessions (
                         -- Основные идентификаторы
@@ -76,22 +77,137 @@ class TelemedDatabase:
                         created_at TIMESTAMPTZ DEFAULT NOW(),
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     );
-                    
-                    -- Индексы
-                    CREATE INDEX IF NOT EXISTS idx_telemed_external_id ON telemed_sessions(external_id);
-                    CREATE INDEX IF NOT EXISTS idx_telemed_user_id ON telemed_sessions(user_id);
-                    CREATE INDEX IF NOT EXISTS idx_telemed_schedule_date ON telemed_sessions(schedule_date);
-                    CREATE INDEX IF NOT EXISTS idx_telemed_status ON telemed_sessions(status);
-                    CREATE INDEX IF NOT EXISTS idx_telemed_reminder_24h 
-                        ON telemed_sessions(reminder_24h_at, reminder_24h_sent_at);
-                    CREATE INDEX IF NOT EXISTS idx_telemed_reminder_15m 
-                        ON telemed_sessions(reminder_15m_at, reminder_15m_sent_at);
                 """)
                 self.conn.commit()
-                log_system_event("tmk_database", "table_created")
+                
+            # Миграция: добавляем ВСЕ недостающие столбцы (для существующих таблиц)
+            with self.conn.cursor() as cursor:
+                # Основные идентификаторы
+                self._add_column_if_not_exists(cursor, "external_id", "VARCHAR(255)")
+                
+                # Данные пациента
+                self._add_column_if_not_exists(cursor, "user_id", "BIGINT")
+                self._add_column_if_not_exists(cursor, "patient_phone", "VARCHAR(20)")
+                self._add_column_if_not_exists(cursor, "patient_fio", "VARCHAR(255)")
+                self._add_column_if_not_exists(cursor, "patient_snils", "VARCHAR(14)")
+                self._add_column_if_not_exists(cursor, "patient_oms_number", "VARCHAR(16)")
+                self._add_column_if_not_exists(cursor, "patient_oms_series", "VARCHAR(10)")
+                self._add_column_if_not_exists(cursor, "patient_birth_date", "DATE")
+                self._add_column_if_not_exists(cursor, "patient_sex", "VARCHAR(1)")
+                
+                # Данные врача
+                self._add_column_if_not_exists(cursor, "doctor_fio", "VARCHAR(255)")
+                self._add_column_if_not_exists(cursor, "doctor_snils", "VARCHAR(14)")
+                self._add_column_if_not_exists(cursor, "doctor_specialization", "VARCHAR(255)")
+                self._add_column_if_not_exists(cursor, "doctor_position", "VARCHAR(255)")
+                
+                # Данные клиники
+                self._add_column_if_not_exists(cursor, "clinic_name", "VARCHAR(255)")
+                self._add_column_if_not_exists(cursor, "clinic_address", "VARCHAR(500)")
+                self._add_column_if_not_exists(cursor, "clinic_mo_oid", "VARCHAR(255)")
+                self._add_column_if_not_exists(cursor, "clinic_phone", "VARCHAR(20)")
+                
+                # Данные консультации
+                self._add_column_if_not_exists(cursor, "schedule_date", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "status", "VARCHAR(20)")
+                self._add_column_if_not_exists(cursor, "pay_method", "VARCHAR(20)")
+                
+                # MAX чат
+                self._add_column_if_not_exists(cursor, "chat_id", "BIGINT")
+                self._add_column_if_not_exists(cursor, "chat_invite_link", "TEXT")
+                
+                # Напоминания
+                self._add_column_if_not_exists(cursor, "reminder_24h_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "reminder_15m_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "reminder_24h_sent_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "reminder_15m_sent_at", "TIMESTAMPTZ")
+                
+                # Согласие пациента
+                self._add_column_if_not_exists(cursor, "consent_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "consent_message_id", "BIGINT")
+                
+                # Метаданные
+                self._add_column_if_not_exists(cursor, "created_at", "TIMESTAMPTZ DEFAULT NOW()")
+                self._add_column_if_not_exists(cursor, "updated_at", "TIMESTAMPTZ DEFAULT NOW()")
+                
+                self.conn.commit()
+            
+            # Создаём индексы только если столбцы существуют
+            with self.conn.cursor() as cursor:
+                self._create_indexes_safe(cursor)
+                self.conn.commit()
+            
+            log_system_event("tmk_database", "table_created")
         except psycopg2.Error as e:
             log_system_event("tmk_database", "table_creation_error", error=str(e))
             self.conn.rollback()
+    
+    def _add_column_if_not_exists(self, cursor, column_name: str, column_type: str):
+        """Добавляет столбец если его нет"""
+        try:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='telemed_sessions' AND column_name=%s;
+            """, (column_name,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE telemed_sessions ADD COLUMN {column_name} {column_type}")
+                log_system_event("tmk_database", "column_added", column=column_name)
+        except psycopg2.Error as e:
+            log_system_event("tmk_database", "column_add_error", error=str(e), column=column_name)
+    
+    def _create_indexes_safe(self, cursor):
+        """Создаёт индексы только если соответствующие столбцы существуют"""
+        indexes = [
+            ("idx_telemed_external_id", "external_id"),
+            ("idx_telemed_user_id", "user_id"),
+            ("idx_telemed_schedule_date", "schedule_date"),
+            ("idx_telemed_status", "status"),
+        ]
+        
+        for index_name, column_name in indexes:
+            try:
+                # Проверяем существование столбца
+                cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='telemed_sessions' AND column_name=%s;
+                """, (column_name,))
+                if cursor.fetchone():
+                    cursor.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON telemed_sessions({column_name})")
+            except psycopg2.Error as e:
+                log_system_event("tmk_database", "index_creation_error", error=str(e), index=index_name)
+        
+        # Составные индексы для напоминаний
+        try:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='telemed_sessions' 
+                AND column_name IN ('reminder_24h_at', 'reminder_24h_sent_at');
+            """)
+            if len(cursor.fetchall()) == 2:
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_telemed_reminder_24h 
+                    ON telemed_sessions(reminder_24h_at, reminder_24h_sent_at)
+                """)
+        except psycopg2.Error as e:
+            log_system_event("tmk_database", "index_creation_error", error=str(e), index="idx_telemed_reminder_24h")
+        
+        try:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='telemed_sessions' 
+                AND column_name IN ('reminder_15m_at', 'reminder_15m_sent_at');
+            """)
+            if len(cursor.fetchall()) == 2:
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_telemed_reminder_15m 
+                    ON telemed_sessions(reminder_15m_at, reminder_15m_sent_at)
+                """)
+        except psycopg2.Error as e:
+            log_system_event("tmk_database", "index_creation_error", error=str(e), index="idx_telemed_reminder_15m")
     
     def create_session(self, session_data: Dict[str, Any]) -> Optional[str]:
         """

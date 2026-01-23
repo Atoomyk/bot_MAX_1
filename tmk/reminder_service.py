@@ -160,6 +160,29 @@ class ReminderService:
                     # Ждём точное время
                     await asyncio.sleep(wait_seconds)
                 
+                elif wait_seconds <= 0:
+                    # Время уже прошло - проверяем, не было ли уже отправлено
+                    # Удаляем из очереди без отправки
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.queue.get
+                    )
+                    
+                    # Проверяем в БД, не было ли уже отправлено
+                    session = self.db.get_session_by_id(session_id)
+                    if session and session[f'reminder_{reminder_type}_sent_at'] is None:
+                        # Время прошло, но не было отправлено - логируем и пропускаем
+                        log_system_event(
+                            "reminder_service",
+                            "reminder_time_passed",
+                            session_id=session_id,
+                            reminder_type=reminder_type,
+                            send_at=send_at.isoformat(),
+                            now=now.isoformat(),
+                            wait_seconds=wait_seconds
+                        )
+                    continue
+                
                 # Удаляем из очереди
                 await asyncio.get_event_loop().run_in_executor(
                     None,
@@ -222,6 +245,24 @@ class ReminderService:
             )
             return
         
+        # Проверяем, что время напоминания еще актуально (не прошло более чем на 1 час)
+        reminder_time = session[f'reminder_{reminder_type}_at']
+        if reminder_time:
+            now = datetime.now(MOSCOW_TZ)
+            time_diff = (now - reminder_time).total_seconds()
+            # Если время прошло более чем на 1 час, не отправляем
+            if time_diff > 3600:
+                log_system_event(
+                    "reminder_service",
+                    "reminder_time_too_old",
+                    session_id=session_id,
+                    reminder_type=reminder_type,
+                    reminder_time=reminder_time.isoformat(),
+                    now=now.isoformat(),
+                    time_diff_seconds=time_diff
+                )
+                return
+        
         # Проверяем наличие user_id (найден ли пациент)
         if not session['user_id']:
             log_system_event(
@@ -272,20 +313,32 @@ class ReminderService:
             )
             return
         
-        # Проверяем наличие согласия
-        has_consent = session['consent_at'] is not None
+        # ВАЖНО: Проверяем актуальное состояние согласия из БД в момент отправки
+        # Это гарантирует, что если пациент нажал "Согласен" между добавлением в очередь и отправкой,
+        # мы получим актуальные данные
+        current_session = self.db.get_session_by_id(str(session['id']))
+        if not current_session:
+            log_system_event(
+                "reminder_service",
+                "session_not_found_on_send",
+                session_id=str(session['id'])
+            )
+            return
+        
+        # Используем актуальные данные сессии
+        has_consent = current_session['consent_at'] is not None
         
         if has_consent:
-            message_text = build_reminder_24h_with_consent(session)
+            message_text = build_reminder_24h_with_consent(current_session)
             # Согласие уже есть, кнопку не показываем
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=message_text
             )
         else:
-            message_text = build_reminder_24h_without_consent(session)
+            message_text = build_reminder_24h_without_consent(current_session)
             # Согласия нет, показываем кнопку
-            await self._send_with_consent_button(user_id, session, message_text)
+            await self._send_with_consent_button(user_id, current_session, message_text)
     
     async def _send_15m_reminder(self, user_id: int, session: dict):
         """Отправка напоминания за 15 минут"""
@@ -299,23 +352,33 @@ class ReminderService:
             )
             return
         
-        # Проверяем наличие согласия
-        has_consent = session['consent_at'] is not None
+        # ВАЖНО: Проверяем актуальное состояние согласия из БД в момент отправки
+        # Это гарантирует, что если пациент нажал "Согласен" между добавлением в очередь и отправкой,
+        # мы получим актуальные данные
+        current_session = self.db.get_session_by_id(str(session['id']))
+        if not current_session:
+            log_system_event(
+                "reminder_service",
+                "session_not_found_on_send",
+                session_id=str(session['id'])
+            )
+            return
+        
+        # Используем актуальные данные сессии
+        has_consent = current_session['consent_at'] is not None
         
         if has_consent:
-            # Отправляем со ссылкой на чат
-            message_text = build_reminder_15m_with_link(session)
+            # Отправляем со ссылкой на чат (согласие есть)
+            message_text = build_reminder_15m_with_link(current_session)
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=message_text
             )
         else:
-            # Отправляем информационное сообщение без ссылки
-            message_text = build_reminder_15m_without_consent(session)
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=message_text
-            )
+            # Отправляем информационное сообщение без ссылки, но С кнопкой "Согласен"
+            # согласно ТЗ: если consent_at IS NULL → возможно кнопка "Согласен" (опционально)
+            message_text = build_reminder_15m_without_consent(current_session)
+            await self._send_with_consent_button(user_id, current_session, message_text)
     
     async def _send_with_consent_button(self, user_id: int, session: dict, message_text: str):
         """

@@ -9,6 +9,14 @@ from user_database import db
 from logging_config import log_user_event, log_data_event, log_system_event
 from bot_utils import create_keyboard
 from patient_api_client import get_patients_by_phone
+from esia import (
+    generate_esia_url,
+    wait_for_esia_file,
+    parse_esia_file,
+    save_esia_data_to_db,
+    delete_esia_file
+)
+import asyncio
 
 # Callback-константы для регистрации
 # SOGL_LINK = "https://sevmiac.ru/upload/iblock/d73/sttjnvlhg3j2df943ve0fv3husrlm8oj.pdf"
@@ -353,9 +361,8 @@ class RegistrationHandler:
         adult_patients = [p for p in found_patients if self._is_adult(p.get('birth_date', ''))]
         
         if not adult_patients:
-            # Если ничего не нашли (или все несовершеннолетние) — обычная регистрация
-            # start_fio_request(self, bot_instance, user_id, chat_id, user_data)
-            await self.start_fio_request(bot_instance, user_id, chat_id, user_data)
+            # Если ничего не нашли (или все несовершеннолетние) — предлагаем ЕСИА
+            await self.show_esia_option(bot_instance, user_id, chat_id, user_data)
             return
 
         # Если нашли ровно одного взрослого — выбираем автоматически
@@ -714,6 +721,129 @@ class RegistrationHandler:
             self.user_states[user_id] = {'state': 'waiting_confirmation', 'data': user_data}
             await self.send_confirmation_message(bot_instance, user_id, chat_id, user_data)
         return success
+
+    async def show_esia_option(self, bot_instance: Bot, user_id: int, chat_id: int, user_data: dict):
+        """
+        Показывает сообщение с опцией входа через ЕСИА, если данные не найдены в региональной системе
+        """
+        log_user_event(user_id, "esia_option_shown")
+        
+        esia_url = generate_esia_url(user_id)
+        
+        # Создаем кнопку с URL для ЕСИА
+        keyboard = create_keyboard([[
+            {'type': 'link', 'text': 'Войти через ЕСИА', 'url': esia_url}
+        ]])
+        
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="В региональной системе данные не найдены.",
+            attachments=[keyboard] if keyboard else []
+        )
+        
+        # Сохраняем состояние для последующей обработки
+        self.user_states[user_id] = {
+            'state': 'waiting_esia',
+            'data': user_data
+        }
+        
+        # Запускаем фоновую задачу мониторинга файла ЕСИА
+        asyncio.create_task(self.monitor_esia_file(bot_instance, user_id, chat_id))
+
+    async def monitor_esia_file(self, bot_instance: Bot, user_id: int, chat_id: int):
+        """
+        Фоновая задача для мониторинга файла ЕСИА после авторизации пользователя
+        
+        Args:
+            bot_instance: Экземпляр бота
+            user_id: ID пользователя
+            chat_id: ID чата
+        """
+        log_user_event(user_id, "esia_monitoring_started")
+        
+        # Отправляем сообщение о начале ожидания
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="⏳ Ожидание данных из ЕСИА..."
+        )
+        
+        # Ждем появления файла
+        file_path = await wait_for_esia_file(user_id)
+        
+        if not file_path:
+            # Файл не появился после всех попыток
+            log_user_event(user_id, "esia_file_not_received")
+            await bot_instance.send_message(
+                chat_id=chat_id,
+                text="Ошибка сервиса. Попробуйте пройти авторизацию позже."
+            )
+            
+            # Показываем стартовое сообщение
+            from bot_handlers import send_welcome_message
+            await send_welcome_message(bot_instance, chat_id)
+            
+            # Очищаем состояние
+            self.user_states.pop(user_id, None)
+            return
+        
+        # Файл найден, парсим данные
+        log_user_event(user_id, "esia_file_received", file_path=file_path)
+        data = parse_esia_file(file_path)
+        
+        if not data:
+            # Ошибка парсинга файла
+            log_user_event(user_id, "esia_file_parse_failed", file_path=file_path)
+            await bot_instance.send_message(
+                chat_id=chat_id,
+                text="Ошибка обработки данных из ЕСИА. Попробуйте позже."
+            )
+            
+            # Показываем стартовое сообщение
+            from bot_handlers import send_welcome_message
+            await send_welcome_message(bot_instance, chat_id)
+            
+            # Очищаем состояние
+            self.user_states.pop(user_id, None)
+            return
+        
+        # Сохраняем данные в БД
+        log_user_event(user_id, "esia_data_saving_attempt")
+        success = save_esia_data_to_db(user_id, chat_id, data)
+        
+        if not success:
+            # Ошибка сохранения в БД
+            log_user_event(user_id, "esia_data_save_failed")
+            await bot_instance.send_message(
+                chat_id=chat_id,
+                text="Ошибка сохранения данных. Попробуйте позже."
+            )
+            
+            # Показываем стартовое сообщение
+            from bot_handlers import send_welcome_message
+            await send_welcome_message(bot_instance, chat_id)
+            
+            # Очищаем состояние
+            self.user_states.pop(user_id, None)
+            return
+        
+        # Удаляем файл после успешной обработки
+        delete_esia_file(file_path)
+        
+        # Регистрация успешна
+        log_user_event(user_id, "esia_registration_completed")
+        self.user_states.pop(user_id, None)
+        
+        # Получаем имя для приветствия
+        greeting_name = db.get_user_greeting(user_id)
+        
+        await bot_instance.send_message(
+            chat_id=chat_id,
+            text="✅ Успешная регистрация через ЕСИА!\nТеперь вы можете пользоваться всеми функциями бота."
+        )
+        
+        # Показываем главное меню
+        from bot_utils import send_main_menu
+        await send_main_menu(bot_instance, chat_id, greeting_name)
 
     async def handle_incorrect_data_info(self, bot_instance: Bot, chat_id: int):
         """Информирование пользователя о действиях при неверных данных из РМИС"""

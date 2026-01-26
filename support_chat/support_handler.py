@@ -32,7 +32,7 @@ if ADMIN_ID:
 
 # Константы
 TICKETS_DIR = Path("tickets")
-INACTIVITY_TIMEOUT = 7200  # 2 часа в секундах
+INACTIVITY_TIMEOUT = 3600  # 1 час в секундах
 LOG_RETENTION_DAYS = 30  # Хранить логи 30 дней
 
 

@@ -94,12 +94,14 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
         Создание новой записи на телемедицинскую консультацию
         
         Процесс:
-        1. Создание чата через MAX API
+        1. Проверка существования сессии с таким external_id
         2. Поиск пациента по телефону в БД
-        3. Сохранение сессии в БД
-        4. Добавление напоминаний в очередь
-        5. Отправка первого сообщения пациенту
-        6. Возврат ответа в МИС
+        3. Проверка регистрации пациента (если не найден - возврат ошибки)
+        4. Создание чата через MAX API
+        5. Сохранение сессии в БД
+        6. Добавление напоминаний в очередь
+        7. Отправка первого сообщения пациенту
+        8. Возврат ответа в МИС
         """
         log_system_event(
             "tmk_api",
@@ -127,37 +129,14 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="Duplicate external_id"
                 )
             
-            # 2. Создание чата через MAX API
-            doctor_fio = request.doctor.get_full_name()
-            patient_fio = request.patient.get_full_name()
-            
-            chat_data = await SferumClient.create_telemedicine_chat(
-                doctor_fio=doctor_fio,
-                patient_fio=patient_fio
-            )
-            
-            if not chat_data:
-                log_system_event(
-                    "tmk_api",
-                    "chat_creation_failed",
-                    external_id=request.externalId
-                )
-                return TelemedCreateResponse(
-                    status="error",
-                    id="",
-                    externalId=request.externalId,
-                    message="Не удалось создать чат после 3 попыток",
-                    error="MAX API error"
-                )
-            
-            # 3. Парсинг даты консультации
+            # 2. Парсинг даты консультации
             schedule_date = parse_datetime_with_tz(request.scheduleDate)
             
-            # 4. Расчёт времени напоминаний
+            # 3. Расчёт времени напоминаний
             reminder_24h_at = schedule_date - timedelta(hours=24)
             reminder_15m_at = schedule_date - timedelta(minutes=15)
             
-            # 5. Поиск пациента по телефону
+            # 4. Поиск пациента по телефону
             patient_phone = normalize_phone(
                 request.patient.phone if request.patient.phone else ""
             )
@@ -190,7 +169,46 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                         phone=patient_phone
                     )
             
-            # 6. Подготовка данных для БД
+            # 5. Проверка существования пациента перед созданием чата
+            if user_id is None:
+                log_system_event(
+                    "tmk_api",
+                    "patient_not_registered",
+                    external_id=request.externalId,
+                    phone=patient_phone
+                )
+                return TelemedCreateResponse(
+                    status="error",
+                    id="",
+                    externalId=request.externalId,
+                    message="Пациент не зарегистрирован в системе",
+                    error="Patient not registered"
+                )
+            
+            # 6. Создание чата через MAX API (только если пациент найден)
+            doctor_fio = request.doctor.get_full_name()
+            patient_fio = request.patient.get_full_name()
+            
+            chat_data = await SferumClient.create_telemedicine_chat(
+                doctor_fio=doctor_fio,
+                patient_fio=patient_fio
+            )
+            
+            if not chat_data:
+                log_system_event(
+                    "tmk_api",
+                    "chat_creation_failed",
+                    external_id=request.externalId
+                )
+                return TelemedCreateResponse(
+                    status="error",
+                    id="",
+                    externalId=request.externalId,
+                    message="Не удалось создать чат после 3 попыток",
+                    error="MAX API error"
+                )
+            
+            # 7. Подготовка данных для БД
             session_data = {
                 "external_id": request.externalId,
                 "user_id": user_id,
@@ -218,7 +236,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                 "reminder_15m_at": reminder_15m_at
             }
             
-            # 7. Сохранение в БД
+            # 8. Сохранение в БД
             session_id = tmk_db.create_session(session_data)
             
             if not session_id:
@@ -235,7 +253,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="Database error"
                 )
             
-            # 8. Добавление напоминаний в очередь
+            # 9. Добавление напоминаний в очередь
             now = datetime.now(MOSCOW_TZ)
             
             if reminder_24h_at > now:
@@ -244,7 +262,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             if reminder_15m_at > now:
                 await reminder_service.add_reminder(session_id, '15m', reminder_15m_at)
             
-            # 9. Отправка первого сообщения пациенту (если найден)
+            # 10. Отправка первого сообщения пациенту
             if user_id:
                 session = tmk_db.get_session_by_id(session_id)
                 await reminder_service.send_initial_message(user_id, session)
@@ -256,7 +274,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     user_id=user_id
                 )
             
-            # 10. Возврат ответа в МИС
+            # 11. Возврат ответа в МИС
             log_system_event(
                 "tmk_api",
                 "session_created_successfully",

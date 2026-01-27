@@ -848,15 +848,22 @@ class SupportHandler:
         # Берем первого пользователя из очереди
         next_chat = self.waiting_queue.pop(0)
         user_id = next_chat['user_id']
+        chat_id = next_chat['chat_id']
         user_data = next_chat['user_data']
 
         # Создаем новый чат
-        self._create_new_chat(user_id, user_data)
+        self._create_new_chat(user_id, chat_id, user_data)
 
-        # Уведомляем админа
         bot = self._get_bot()
-        if self.admin_id and bot:
-            await self._notify_admin_new_chat(bot, user_id, user_data)
+        if bot:
+            # Сообщаем пользователю, что оператор освободился
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⏳ Оператор освободился. Опишите вашу проблему или вопрос. Как только оператор подключится, он увидит все ваши сообщения.\n\nЧтобы выйти из чата — отправьте цифру 0."
+            )
+            # Уведомляем админа о следующем пользователе в очереди
+            if self.admin_id:
+                await self._notify_admin_new_chat(bot, user_id, chat_id, user_data)
 
         log_system_event("support_chat", "next_user_notified", user_id=user_id)
 

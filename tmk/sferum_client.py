@@ -4,15 +4,18 @@
 import os
 import asyncio
 import aiohttp
+import json
 from typing import Optional, Dict
 from dotenv import load_dotenv
 
 from logging_config import log_system_event
+from tmk.utils import normalize_phone
 
 load_dotenv()
 
 SFERUM_ACCESS_TOKEN = os.getenv("SFERUM_ACCESS_TOKEN")
-SFERUM_API_URL = "https://ejd-api.sferum-dev.ru/method/educationSchool.createChat"
+SFERUM_CREATE_CHAT_URL = "https://ejd-api.sferum-dev.ru/method/educationSchool.createChat"
+SFERUM_ADD_CHAT_USERS_URL = "https://ejd-api.sferum-dev.ru/method/educationSchool.addChatUsers"
 
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 60
@@ -55,7 +58,7 @@ class SferumClient:
                 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
-                        SFERUM_API_URL,
+                        SFERUM_CREATE_CHAT_URL,
                         data=data,
                         headers={"Content-Type": "application/x-www-form-urlencoded"}
                     ) as response:
@@ -138,3 +141,142 @@ class SferumClient:
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
         
         return None
+
+    @staticmethod
+    async def add_doctor_as_admin(
+        chat_id: int,
+        doctor_phone: str
+    ) -> bool:
+        """
+        Добавление врача в чат как администратора
+        
+        Args:
+            chat_id: ID чата телемедицины
+            doctor_phone: Телефон врача (как приходит из МИС)
+        
+        Returns:
+            True если добавление прошло успешно, False при ошибке
+        """
+        if not doctor_phone:
+            log_system_event(
+                "sferum_client",
+                "add_doctor_missing_phone",
+                chat_id=chat_id
+            )
+            return False
+
+        # Приводим телефон к формату, ожидаемому Sferum: число без плюса
+        normalized = normalize_phone(doctor_phone)  # +7XXXXXXXXXX
+        phone_digits = "".join(filter(str.isdigit, normalized))
+
+        users_payload = [
+            {
+                "phone": phone_digits,
+                "chat_role": "teacher",
+                "member_role": "admin",
+            }
+        ]
+
+        data = {
+            "access_token": SFERUM_ACCESS_TOKEN,
+            "chat_id": chat_id,
+            "users": json.dumps(users_payload, ensure_ascii=False),
+        }
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                log_system_event(
+                    "sferum_client",
+                    "add_doctor_as_admin_attempt",
+                    attempt=attempt,
+                    chat_id=chat_id,
+                    phone=phone_digits,
+                )
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        SFERUM_ADD_CHAT_USERS_URL,
+                        data=data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    ) as response:
+                        result = await response.json()
+
+                        if "response" in result:
+                            failed = result["response"].get("failed_users", [])
+                            queued = result["response"].get("queued_users", [])
+
+                            log_system_event(
+                                "sferum_client",
+                                "add_doctor_as_admin_response",
+                                chat_id=chat_id,
+                                failed_users=str(failed),
+                                queued_users=str(queued),
+                            )
+
+                            # Считаем успехом даже queued_users (врач будет добавлен, когда появится в MAX)
+                            if not failed:
+                                return True
+
+                            # Если есть failed_users, повторять смысла нет
+                            return False
+
+                        elif "error" in result:
+                            error_code = result["error"].get("error_code", "unknown")
+                            error_msg = result["error"].get("error_msg", "Unknown error")
+
+                            log_system_event(
+                                "sferum_client",
+                                "add_doctor_as_admin_api_error",
+                                attempt=attempt,
+                                chat_id=chat_id,
+                                error_code=error_code,
+                                error_msg=error_msg,
+                            )
+
+                            if attempt == MAX_RETRIES:
+                                return False
+
+                            await asyncio.sleep(RETRY_DELAY_SECONDS)
+                        else:
+                            log_system_event(
+                                "sferum_client",
+                                "add_doctor_as_admin_unexpected_response",
+                                attempt=attempt,
+                                chat_id=chat_id,
+                                response=str(result),
+                            )
+
+                            if attempt == MAX_RETRIES:
+                                return False
+
+                            await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+            except aiohttp.ClientError as e:
+                log_system_event(
+                    "sferum_client",
+                    "add_doctor_as_admin_network_error",
+                    attempt=attempt,
+                    chat_id=chat_id,
+                    error=str(e),
+                )
+
+                if attempt == MAX_RETRIES:
+                    return False
+
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+            except Exception as e:
+                log_system_event(
+                    "sferum_client",
+                    "add_doctor_as_admin_unexpected_error",
+                    attempt=attempt,
+                    chat_id=chat_id,
+                    error=str(e),
+                )
+
+                if attempt == MAX_RETRIES:
+                    return False
+
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+        return False

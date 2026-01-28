@@ -208,6 +208,39 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="MAX API error"
                 )
             
+            # 6.1. Назначение врача администратором чата
+            doctor_phone_raw = request.clinic.phone
+            admin_set = False
+            try:
+                admin_set = await SferumClient.add_doctor_as_admin(
+                    chat_id=chat_data["chat_id"],
+                    doctor_phone=doctor_phone_raw
+                )
+            except Exception as e:
+                log_system_event(
+                    "tmk_api",
+                    "set_doctor_admin_error",
+                    external_id=request.externalId,
+                    error=str(e)
+                )
+                admin_set = False
+
+            if not admin_set:
+                log_system_event(
+                    "tmk_api",
+                    "set_doctor_admin_failed",
+                    external_id=request.externalId,
+                    chat_id=chat_data["chat_id"],
+                    doctor_phone=doctor_phone_raw
+                )
+                return TelemedCreateResponse(
+                    status="error",
+                    id="",
+                    externalId=request.externalId,
+                    message="Не удалось назначить врача администратором чата. Консультация не создана.",
+                    error="Doctor admin assignment failed"
+                )
+            
             # 7. Подготовка данных для БД
             session_data = {
                 "external_id": request.externalId,

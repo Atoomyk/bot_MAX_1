@@ -473,6 +473,9 @@ async def message_callback(event: MessageCallback):
             # Логирование phone_confirmed происходит в handle_phone_confirmation
             await registration_handler.handle_phone_confirmation(event.bot, user_id, chat_id)
 
+        elif payload == "esia_check_data":
+            await registration_handler.handle_esia_check(event.bot, user_id, chat_id)
+
         elif payload == "reject_phone":
             # Логирование phone_rejected происходит в handle_incorrect_phone
             await registration_handler.handle_incorrect_phone(event.bot, user_id, chat_id)

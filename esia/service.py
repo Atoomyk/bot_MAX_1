@@ -94,15 +94,17 @@ async def wait_for_esia_file(user_id: int) -> Optional[str]:
     return None
 
 
-def parse_esia_file(file_path: str) -> Optional[Dict[str, str]]:
+def parse_esia_file(file_path: str, fallback_phone: Optional[str] = None) -> Optional[Dict[str, str]]:
     """
     Парсит данные из файла ЕСИА
     
     Формат файла: ФИО,телефон,дата_рождения,СНИЛС,ОМС,пол
     Пример: Иван Максим Валерьевич,9787229457,1984-12-13,18122204630,8650910446000105,1
+    Поле телефон может быть null — тогда используется fallback_phone (телефон, подтверждённый при регистрации).
     
     Args:
         file_path: Путь к файлу
+        fallback_phone: Телефон из регистрации, если в файле указан null
         
     Returns:
         Словарь с данными пользователя или None в случае ошибки
@@ -124,17 +126,26 @@ def parse_esia_file(file_path: str) -> Optional[Dict[str, str]]:
         
         fio = parts[0]
         phone_raw = parts[1]
-        birth_date_raw = parts[2]  # Формат: 1984-12-13
+        birth_date_raw = parts[2]  # Формат: 1984-12-13 или null
         snils = parts[3]
         oms = parts[4] if parts[4].lower() != 'null' else None
         gender_code = parts[5]
         
-        # Преобразование телефона: добавляем +7
-        if phone_raw and len(phone_raw) == 10:
+        # Преобразование телефона: добавляем +7. Если в файле null — берём из регистрации
+        if phone_raw and str(phone_raw).lower() != 'null' and len(str(phone_raw)) == 10:
             phone = f"+7{phone_raw}"
+        elif fallback_phone:
+            phone = fallback_phone
         else:
             log_system_event("esia", "file_parse_error", 
                            error=f"Invalid phone format: {phone_raw}",
+                           file_path=file_path)
+            return None
+        
+        # Дата рождения обязательна; null не допускается
+        if not birth_date_raw or str(birth_date_raw).strip().lower() == 'null':
+            log_system_event("esia", "file_parse_error",
+                           error="birth_date is null or empty",
                            file_path=file_path)
             return None
         

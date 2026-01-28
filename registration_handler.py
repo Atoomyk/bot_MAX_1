@@ -724,31 +724,38 @@ class RegistrationHandler:
 
     async def show_esia_option(self, bot_instance: Bot, user_id: int, chat_id: int, user_data: dict):
         """
-        Показывает сообщение с опцией входа через ЕСИА, если данные не найдены в региональной системе
+        Показывает сообщение с опцией входа через ЕСИА, если данные не найдены в региональной системе.
+        Один экран: текст и ссылка «Войти через ЕСИА». Мониторинг файла запускается автоматически.
         """
         log_user_event(user_id, "esia_option_shown")
         
         esia_url = generate_esia_url(user_id)
-        
-        # Создаем кнопку с URL для ЕСИА
-        keyboard = create_keyboard([[
-            {'type': 'link', 'text': 'Войти через ЕСИА', 'url': esia_url}
-        ]])
-        
+        keyboard = create_keyboard([[{'type': 'link', 'text': 'Войти через ЕСИА', 'url': esia_url}]])
         await bot_instance.send_message(
             chat_id=chat_id,
-            text="В региональной системе данные не найдены.",
+            text="В региональной системе данные не найдены.\n\nНажмите кнопку ниже и пройдите авторизацию в ЕСИА.",
             attachments=[keyboard] if keyboard else []
         )
         
-        # Сохраняем состояние для последующей обработки
         self.user_states[user_id] = {
             'state': 'waiting_esia',
             'data': user_data
         }
-        
-        # Запускаем фоновую задачу мониторинга файла ЕСИА
         asyncio.create_task(self.monitor_esia_file(bot_instance, user_id, chat_id))
+
+    async def handle_esia_check(self, bot_instance: Bot, user_id: int, chat_id: int):
+        """
+        Вызывается только при нажатии «Я прошёл авторизацию в ЕСИА».
+        Запускает мониторинг файла ЕСИА только в этом случае.
+        """
+        state_info = self.user_states.get(user_id, {})
+        if state_info.get('state') != 'waiting_esia':
+            await bot_instance.send_message(
+                chat_id=chat_id,
+                text="Сначала нажмите «Войти через ЕСИА», пройдите авторизацию, затем нажмите «Я прошёл авторизацию в ЕСИА»."
+            )
+            return
+        await self.monitor_esia_file(bot_instance, user_id, chat_id)
 
     async def monitor_esia_file(self, bot_instance: Bot, user_id: int, chat_id: int):
         """
@@ -786,9 +793,11 @@ class RegistrationHandler:
             self.user_states.pop(user_id, None)
             return
         
-        # Файл найден, парсим данные
+        # Файл найден, парсим данные (телефон из регистрации — на случай null в файле)
         log_user_event(user_id, "esia_file_received", file_path=file_path)
-        data = parse_esia_file(file_path)
+        user_data = (self.user_states.get(user_id) or {}).get('data', {})
+        fallback_phone = user_data.get('phone')
+        data = parse_esia_file(file_path, fallback_phone=fallback_phone)
         
         if not data:
             # Ошибка парсинга файла

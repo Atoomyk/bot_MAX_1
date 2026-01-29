@@ -208,37 +208,36 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="MAX API error"
                 )
             
-            # 6.1. Назначение врача администратором чата
-            doctor_phone_raw = request.clinic.phone
-            admin_set = False
+            # 6.1. Добавление врача и пациента в чат (teacher/admin и student/member)
+            members_added = False
             try:
-                admin_set = await SferumClient.add_doctor_as_admin(
+                members_added = await SferumClient.add_telemed_chat_members(
                     chat_id=chat_data["chat_id"],
-                    doctor_phone=doctor_phone_raw
+                    doctor_phone=request.clinic.phone,
+                    patient_phone=patient_phone,
                 )
             except Exception as e:
                 log_system_event(
                     "tmk_api",
-                    "set_doctor_admin_error",
+                    "add_chat_members_error",
                     external_id=request.externalId,
                     error=str(e)
                 )
-                admin_set = False
+                members_added = False
 
-            if not admin_set:
+            if not members_added:
                 log_system_event(
                     "tmk_api",
-                    "set_doctor_admin_failed",
+                    "add_chat_members_failed",
                     external_id=request.externalId,
                     chat_id=chat_data["chat_id"],
-                    doctor_phone=doctor_phone_raw
                 )
                 return TelemedCreateResponse(
                     status="error",
                     id="",
                     externalId=request.externalId,
-                    message="Не удалось назначить врача администратором чата. Консультация не создана.",
-                    error="Doctor admin assignment failed"
+                    message="Не удалось добавить участников в чат. Консультация не создана.",
+                    error="Chat members assignment failed"
                 )
             
             # 7. Подготовка данных для БД

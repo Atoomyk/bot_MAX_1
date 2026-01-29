@@ -62,6 +62,8 @@ class TelemedDatabase:
                         -- MAX чат
                         chat_id BIGINT,
                         chat_invite_link TEXT,
+                        call_started_at TIMESTAMPTZ,
+                        call_join_link TEXT,
                         
                         -- Напоминания
                         reminder_24h_at TIMESTAMPTZ,
@@ -115,6 +117,8 @@ class TelemedDatabase:
                 # MAX чат
                 self._add_column_if_not_exists(cursor, "chat_id", "BIGINT")
                 self._add_column_if_not_exists(cursor, "chat_invite_link", "TEXT")
+                self._add_column_if_not_exists(cursor, "call_started_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "call_join_link", "TEXT")
                 
                 # Напоминания
                 self._add_column_if_not_exists(cursor, "reminder_24h_at", "TIMESTAMPTZ")
@@ -404,10 +408,63 @@ class TelemedDatabase:
             self.conn.rollback()
             return False
     
+    def update_call_started(
+        self, session_id: str, join_link: Optional[str] = None
+    ) -> bool:
+        """
+        Обновление времени создания звонка (и ссылки на звонок).
+
+        Args:
+            session_id: UUID сессии
+            join_link: Ссылка на присоединение к звонку (из ответа callStart)
+
+        Returns:
+            True если обновление успешно
+        """
+        try:
+            with self.conn.cursor() as cursor:
+                if join_link is not None:
+                    cursor.execute(
+                        """
+                        UPDATE telemed_sessions
+                        SET call_started_at = NOW(),
+                            call_join_link = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        RETURNING id
+                        """,
+                        (join_link, session_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE telemed_sessions
+                        SET call_started_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = %s
+                        RETURNING id
+                        """,
+                        (session_id,),
+                    )
+                updated = cursor.rowcount > 0
+                self.conn.commit()
+                if updated:
+                    log_system_event(
+                        "tmk_database", "call_started_updated", session_id=session_id
+                    )
+                return updated
+        except psycopg2.Error as e:
+            log_system_event(
+                "tmk_database", "call_started_update_error", error=str(e)
+            )
+            self.conn.rollback()
+            return False
+
     def get_pending_reminders(self) -> List[Dict[str, Any]]:
         """
         Получение всех неотправленных напоминаний для загрузки в очередь
-        
+        (включая сессии, для которых нужно создать звонок в schedule_date).
+
         Returns:
             Список словарей с данными сессий
         """
@@ -420,6 +477,8 @@ class TelemedDatabase:
                           (reminder_24h_sent_at IS NULL AND reminder_24h_at > NOW())
                           OR
                           (reminder_15m_sent_at IS NULL AND reminder_15m_at > NOW())
+                          OR
+                          (call_started_at IS NULL AND schedule_date > NOW())
                       )
                     ORDER BY schedule_date ASC
                 """)

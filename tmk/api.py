@@ -286,7 +286,7 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="Database error"
                 )
             
-            # 9. Добавление напоминаний в очередь
+            # 9. Добавление напоминаний и события «создать звонок» в очередь
             now = datetime.now(MOSCOW_TZ)
             
             if reminder_24h_at > now:
@@ -294,6 +294,9 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             
             if reminder_15m_at > now:
                 await reminder_service.add_reminder(session_id, '15m', reminder_15m_at)
+            
+            if schedule_date > now:
+                await reminder_service.add_reminder(session_id, 'call_start', schedule_date)
             
             # 10. Отправка первого сообщения пациенту
             if user_id:

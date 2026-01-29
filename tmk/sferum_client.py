@@ -16,6 +16,7 @@ load_dotenv()
 SFERUM_ACCESS_TOKEN = os.getenv("SFERUM_ACCESS_TOKEN")
 SFERUM_CREATE_CHAT_URL = "https://ejd-api.sferum-dev.ru/method/educationSchool.createChat"
 SFERUM_ADD_CHAT_USERS_URL = "https://ejd-api.sferum-dev.ru/method/educationSchool.addChatUsers"
+SFERUM_CALL_START_URL = "https://ejd-api.sferum-dev.ru/method/educationSchool.callStart"
 
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 60
@@ -280,3 +281,101 @@ class SferumClient:
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
 
         return False
+
+    @staticmethod
+    async def start_call(chat_id: int) -> Optional[Dict[str, any]]:
+        """
+        Создание звонка в чате телемедицины (educationSchool.callStart).
+
+        Args:
+            chat_id: ID чата телемедицины
+
+        Returns:
+            Словарь с join_link, call_id, chat_id или None при ошибке
+        """
+        data = {
+            "access_token": SFERUM_ACCESS_TOKEN,
+            "chat_id": chat_id,
+        }
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                log_system_event(
+                    "sferum_client",
+                    "call_start_attempt",
+                    attempt=attempt,
+                    chat_id=chat_id,
+                )
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        SFERUM_CALL_START_URL,
+                        data=data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    ) as response:
+                        result = await response.json()
+
+                        if "response" in result:
+                            call_data = {
+                                "join_link": result["response"].get("join_link"),
+                                "call_id": result["response"].get("call_id"),
+                                "chat_id": result["response"].get("chat_id"),
+                            }
+                            log_system_event(
+                                "sferum_client",
+                                "call_started_successfully",
+                                chat_id=chat_id,
+                                call_id=call_data.get("call_id"),
+                            )
+                            return call_data
+
+                        elif "error" in result:
+                            error_code = result["error"].get("error_code", "unknown")
+                            error_msg = result["error"].get("error_msg", "Unknown error")
+                            log_system_event(
+                                "sferum_client",
+                                "call_start_api_error",
+                                attempt=attempt,
+                                chat_id=chat_id,
+                                error_code=error_code,
+                                error_msg=error_msg,
+                            )
+                            if attempt == MAX_RETRIES:
+                                return None
+                            await asyncio.sleep(RETRY_DELAY_SECONDS)
+                        else:
+                            log_system_event(
+                                "sferum_client",
+                                "call_start_unexpected_response",
+                                attempt=attempt,
+                                chat_id=chat_id,
+                                response=str(result),
+                            )
+                            if attempt == MAX_RETRIES:
+                                return None
+                            await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+            except aiohttp.ClientError as e:
+                log_system_event(
+                    "sferum_client",
+                    "call_start_network_error",
+                    attempt=attempt,
+                    chat_id=chat_id,
+                    error=str(e),
+                )
+                if attempt == MAX_RETRIES:
+                    return None
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+            except Exception as e:
+                log_system_event(
+                    "sferum_client",
+                    "call_start_unexpected_error",
+                    attempt=attempt,
+                    chat_id=chat_id,
+                    error=str(e),
+                )
+                if attempt == MAX_RETRIES:
+                    return None
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+        return None

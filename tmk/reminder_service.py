@@ -14,6 +14,7 @@ from maxapi.utils.inline_keyboard import AttachmentType
 
 from logging_config import log_system_event
 from tmk.database import TelemedDatabase
+from tmk.sferum_client import SferumClient
 from tmk.message_builder import (
     build_initial_message,
     build_reminder_24h_with_consent,
@@ -90,6 +91,13 @@ class ReminderService:
                 if session['reminder_15m_at'] > datetime.now(MOSCOW_TZ):
                     await self.add_reminder(session_id, '15m', session['reminder_15m_at'])
                     loaded_count += 1
+
+            # Добавляем событие «создать звонок» в момент schedule_date
+            schedule_date = session.get('schedule_date')
+            call_started_at = session.get('call_started_at')
+            if schedule_date and call_started_at is None and schedule_date > datetime.now(MOSCOW_TZ):
+                await self.add_reminder(session_id, 'call_start', schedule_date)
+                loaded_count += 1
         
         log_system_event(
             "reminder_service",
@@ -104,7 +112,7 @@ class ReminderService:
         
         Args:
             session_id: UUID сессии
-            reminder_type: Тип ('24h' или '15m')
+            reminder_type: Тип ('24h', '15m' или 'call_start')
             send_at: Время отправки
         """
         # Преобразуем в timestamp для сортировки в очереди
@@ -168,9 +176,15 @@ class ReminderService:
                         self.queue.get
                     )
                     
-                    # Проверяем в БД, не было ли уже отправлено
+                    # Проверяем в БД, не было ли уже отправлено / создано
                     session = self.db.get_session_by_id(session_id)
-                    if session and session[f'reminder_{reminder_type}_sent_at'] is None:
+                    already_done = False
+                    if session:
+                        if reminder_type == 'call_start':
+                            already_done = session.get('call_started_at') is not None
+                        else:
+                            already_done = session.get(f'reminder_{reminder_type}_sent_at') is not None
+                    if session and not already_done:
                         # Время прошло, но не было отправлено - логируем и пропускаем
                         log_system_event(
                             "reminder_service",
@@ -189,8 +203,10 @@ class ReminderService:
                     self.queue.get
                 )
                 
-                # Отправляем напоминание
-                await self._send_reminder(session_id, reminder_type)
+                if reminder_type == 'call_start':
+                    await self._start_telemed_call(session_id)
+                else:
+                    await self._send_reminder(session_id, reminder_type)
                 
             except Exception as e:
                 log_system_event(
@@ -199,6 +215,66 @@ class ReminderService:
                     error=str(e)
                 )
                 await asyncio.sleep(60)
+    
+    async def _start_telemed_call(self, session_id: str):
+        """
+        Создание звонка в чате ТМК в момент schedule_date (educationSchool.callStart).
+
+        Args:
+            session_id: UUID сессии
+        """
+        log_system_event(
+            "reminder_service",
+            "starting_telemed_call",
+            session_id=session_id,
+        )
+        session = self.db.get_session_by_id(session_id)
+        if not session:
+            log_system_event(
+                "reminder_service",
+                "call_start_session_not_found",
+                session_id=session_id,
+            )
+            return
+        if session["status"] == "CANCELLED":
+            log_system_event(
+                "reminder_service",
+                "call_start_session_cancelled",
+                session_id=session_id,
+            )
+            return
+        if session.get("call_started_at") is not None:
+            log_system_event(
+                "reminder_service",
+                "call_start_already_done",
+                session_id=session_id,
+            )
+            return
+        chat_id = session.get("chat_id")
+        if not chat_id:
+            log_system_event(
+                "reminder_service",
+                "call_start_no_chat_id",
+                session_id=session_id,
+            )
+            return
+        call_data = await SferumClient.start_call(chat_id)
+        if call_data and call_data.get("join_link"):
+            self.db.update_call_started(session_id, join_link=call_data["join_link"])
+            log_system_event(
+                "reminder_service",
+                "call_started_successfully",
+                session_id=session_id,
+                chat_id=chat_id,
+                call_id=call_data.get("call_id"),
+            )
+        else:
+            log_system_event(
+                "reminder_service",
+                "call_start_failed",
+                session_id=session_id,
+                chat_id=chat_id,
+            )
     
     async def _send_reminder(self, session_id: str, reminder_type: str):
         """

@@ -107,10 +107,10 @@ async def message_callback(event: MessageCallback):
 
         # --- ТМК Module ---
         if payload.startswith('tmk_consent_'):
-            from bot_config import tmk_database, tmk_bot
+            from bot_config import tmk_database, tmk_bot, tmk_reminder_service
             if tmk_database and tmk_bot:
                 from tmk.handlers import handle_tmk_consent
-                handled = await handle_tmk_consent(event, tmk_bot, tmk_database)
+                handled = await handle_tmk_consent(event, tmk_bot, tmk_database, tmk_reminder_service)
                 if handled:
                     return
         

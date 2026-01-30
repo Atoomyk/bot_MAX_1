@@ -1,7 +1,7 @@
 """
 Обработчики callback кнопок согласия пациента на ТМК
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from maxapi.types import MessageCallback, Attachment, CallbackButton, ButtonsPayload
 from maxapi.utils.inline_keyboard import AttachmentType
 
@@ -12,7 +12,7 @@ from tmk.utils import MOSCOW_TZ
 from user_database import db as user_db
 
 
-async def handle_tmk_consent(event: MessageCallback, bot, db: TelemedDatabase):
+async def handle_tmk_consent(event: MessageCallback, bot, db: TelemedDatabase, reminder_service=None):
     """
     Обработка нажатия кнопки 'Согласен' на ТМК
     
@@ -105,6 +105,33 @@ async def handle_tmk_consent(event: MessageCallback, bot, db: TelemedDatabase):
             session_id=session_id,
             consent_at=consent_time.isoformat()
         )
+
+        # Надёжный вариант: после согласия планируем немедленное добавление участников в телемед-чат.
+        # Это защищает сценарий «согласие после 5 минут», когда плановое событие members_add могло
+        # уже "проскочить" как просроченное.
+        if reminder_service is not None:
+            send_at = datetime.now(MOSCOW_TZ) + timedelta(seconds=5)
+            try:
+                await reminder_service.add_reminder(session_id, 'members_add', send_at)
+                log_system_event(
+                    "tmk_handlers",
+                    "members_add_scheduled_after_consent",
+                    session_id=session_id,
+                    send_at=send_at.isoformat(),
+                )
+            except Exception as e:
+                log_system_event(
+                    "tmk_handlers",
+                    "members_add_schedule_error",
+                    session_id=session_id,
+                    error=str(e),
+                )
+        else:
+            log_system_event(
+                "tmk_handlers",
+                "members_add_not_scheduled_no_service",
+                session_id=session_id,
+            )
         
         # Получаем chat_id пользователя
         chat_id = user_db.get_last_chat_id(user_id)

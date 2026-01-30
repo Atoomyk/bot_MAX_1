@@ -30,7 +30,7 @@ def generate_esia_url(user_id: int) -> str:
     Returns:
         URL для авторизации через ЕСИА
     """
-    return f"https://esia.sevmiac.ru/cas/login?service=http://10.92.240.222:1100/auth/cascallback?user_id={user_id}"
+    return f"https://esia.sevmiac.ru/cas/login?service=https://maxbot-t.sevmiac.ru/auth/cascallback?user_id={user_id}"
 
 
 def get_esia_file_path(user_id: int) -> str:

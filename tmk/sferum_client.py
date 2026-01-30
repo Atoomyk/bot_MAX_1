@@ -5,7 +5,7 @@ import os
 import asyncio
 import aiohttp
 import json
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv
 
 from logging_config import log_system_event
@@ -169,25 +169,47 @@ class SferumClient:
             )
             return False
 
-        def to_digits(phone: str) -> str:
-            normalized = normalize_phone(phone)
-            return "".join(filter(str.isdigit, normalized))
-
-        doctor_digits = to_digits(doctor_phone)
-        patient_digits = to_digits(patient_phone)
-
-        users_payload = [
+        users_payload: List[Dict[str, Any]] = [
             {
-                "phone": doctor_digits,
+                "phone": SferumClient._phone_to_digits(doctor_phone),
                 "chat_role": "teacher",
                 "member_role": "admin",
             },
             {
-                "phone": patient_digits,
+                "phone": SferumClient._phone_to_digits(patient_phone),
                 "chat_role": "student",
                 "member_role": "member",
             },
         ]
+
+        return await SferumClient._add_chat_users(
+            chat_id=chat_id,
+            users_payload=users_payload,
+            log_prefix="add_telemed_chat_members",
+        )
+
+    @staticmethod
+    def _phone_to_digits(phone: str) -> str:
+        normalized = normalize_phone(phone)
+        return "".join(filter(str.isdigit, normalized))
+
+    @staticmethod
+    async def _add_chat_users(
+        chat_id: int,
+        users_payload: List[Dict[str, Any]],
+        log_prefix: str,
+    ) -> bool:
+        """
+        Низкоуровневый вызов educationSchool.addChatUsers.
+        users_payload будет сериализован в JSON строку.
+        """
+        if not users_payload:
+            log_system_event(
+                "sferum_client",
+                f"{log_prefix}_empty_users_payload",
+                chat_id=chat_id,
+            )
+            return False
 
         data = {
             "access_token": SFERUM_ACCESS_TOKEN,
@@ -199,9 +221,10 @@ class SferumClient:
             try:
                 log_system_event(
                     "sferum_client",
-                    "add_telemed_chat_members_attempt",
+                    f"{log_prefix}_attempt",
                     attempt=attempt,
                     chat_id=chat_id,
+                    users_count=len(users_payload),
                 )
 
                 async with aiohttp.ClientSession() as session:
@@ -218,22 +241,20 @@ class SferumClient:
 
                             log_system_event(
                                 "sferum_client",
-                                "add_telemed_chat_members_response",
+                                f"{log_prefix}_response",
                                 chat_id=chat_id,
                                 failed_users=str(failed),
                                 queued_users=str(queued),
                             )
 
-                            if not failed:
-                                return True
-                            return False
+                            return not failed
 
-                        elif "error" in result:
+                        if "error" in result:
                             error_code = result["error"].get("error_code", "unknown")
                             error_msg = result["error"].get("error_msg", "Unknown error")
                             log_system_event(
                                 "sferum_client",
-                                "add_telemed_chat_members_api_error",
+                                f"{log_prefix}_api_error",
                                 attempt=attempt,
                                 chat_id=chat_id,
                                 error_code=error_code,
@@ -242,22 +263,23 @@ class SferumClient:
                             if attempt == MAX_RETRIES:
                                 return False
                             await asyncio.sleep(RETRY_DELAY_SECONDS)
-                        else:
-                            log_system_event(
-                                "sferum_client",
-                                "add_telemed_chat_members_unexpected_response",
-                                attempt=attempt,
-                                chat_id=chat_id,
-                                response=str(result),
-                            )
-                            if attempt == MAX_RETRIES:
-                                return False
-                            await asyncio.sleep(RETRY_DELAY_SECONDS)
+                            continue
+
+                        log_system_event(
+                            "sferum_client",
+                            f"{log_prefix}_unexpected_response",
+                            attempt=attempt,
+                            chat_id=chat_id,
+                            response=str(result),
+                        )
+                        if attempt == MAX_RETRIES:
+                            return False
+                        await asyncio.sleep(RETRY_DELAY_SECONDS)
 
             except aiohttp.ClientError as e:
                 log_system_event(
                     "sferum_client",
-                    "add_telemed_chat_members_network_error",
+                    f"{log_prefix}_network_error",
                     attempt=attempt,
                     chat_id=chat_id,
                     error=str(e),
@@ -268,7 +290,7 @@ class SferumClient:
             except Exception as e:
                 log_system_event(
                     "sferum_client",
-                    "add_telemed_chat_members_unexpected_error",
+                    f"{log_prefix}_unexpected_error",
                     attempt=attempt,
                     chat_id=chat_id,
                     error=str(e),
@@ -278,6 +300,54 @@ class SferumClient:
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
 
         return False
+
+    @staticmethod
+    async def add_doctor_as_admin(chat_id: int, doctor_phone: str) -> bool:
+        """Добавление врача в чат с правами admin (teacher/admin)."""
+        if not doctor_phone:
+            log_system_event(
+                "sferum_client",
+                "add_doctor_missing_phone",
+                chat_id=chat_id,
+            )
+            return False
+
+        users_payload: List[Dict[str, Any]] = [
+            {
+                "phone": SferumClient._phone_to_digits(doctor_phone),
+                "chat_role": "teacher",
+                "member_role": "admin",
+            }
+        ]
+        return await SferumClient._add_chat_users(
+            chat_id=chat_id,
+            users_payload=users_payload,
+            log_prefix="add_doctor_as_admin",
+        )
+
+    @staticmethod
+    async def add_patient_as_member(chat_id: int, patient_phone: str) -> bool:
+        """Добавление пациента в чат как участника (student/member)."""
+        if not patient_phone:
+            log_system_event(
+                "sferum_client",
+                "add_patient_missing_phone",
+                chat_id=chat_id,
+            )
+            return False
+
+        users_payload: List[Dict[str, Any]] = [
+            {
+                "phone": SferumClient._phone_to_digits(patient_phone),
+                "chat_role": "student",
+                "member_role": "member",
+            }
+        ]
+        return await SferumClient._add_chat_users(
+            chat_id=chat_id,
+            users_payload=users_payload,
+            log_prefix="add_patient_as_member",
+        )
 
     @staticmethod
     async def start_call(chat_id: int) -> Optional[Dict[str, any]]:

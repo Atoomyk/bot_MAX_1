@@ -93,11 +93,15 @@ class ReminderService:
                     await self.add_reminder(session_id, '15m', session['reminder_15m_at'])
                     loaded_count += 1
 
-            # Добавляем событие «добавить участников» (врач/пациент) за 15 минут,
-            # с повторами за 5 и 2 минуты до консультации
+            # Добавляем событие «добавить участников»:
+            # - врача (admin) добавляем независимо от согласия
+            # - пациента добавляем ТОЛЬКО после согласия (consent_at)
             schedule_date = session.get('schedule_date')
-            chat_members_added_at = session.get('chat_members_added_at')
-            if schedule_date and chat_members_added_at is None:
+            doctor_added_at = session.get('chat_doctor_added_at')
+            patient_added_at = session.get('chat_patient_added_at')
+            has_consent = session.get('consent_at') is not None
+            need_members_add = (doctor_added_at is None) or (has_consent and patient_added_at is None)
+            if schedule_date and need_members_add:
                 for minutes_before in (15, 5, 2):
                     members_add_at = schedule_date - timedelta(minutes=minutes_before)
                     if members_add_at > now:
@@ -196,7 +200,10 @@ class ReminderService:
                         if reminder_type == 'call_start':
                             already_done = session.get('call_started_at') is not None
                         elif reminder_type == 'members_add':
-                            already_done = session.get('chat_members_added_at') is not None
+                            doctor_done = session.get('chat_doctor_added_at') is not None
+                            has_consent = session.get('consent_at') is not None
+                            patient_done = session.get('chat_patient_added_at') is not None
+                            already_done = doctor_done and (patient_done or not has_consent)
                         else:
                             already_done = session.get(f'reminder_{reminder_type}_sent_at') is not None
                     if session and not already_done:
@@ -321,7 +328,12 @@ class ReminderService:
                 session_id=session_id,
             )
             return
-        if session.get("chat_members_added_at") is not None:
+        # Врач добавляется независимо от consent_at, пациент — только при наличии согласия
+        doctor_done = session.get("chat_doctor_added_at") is not None
+        patient_done = session.get("chat_patient_added_at") is not None
+        has_consent = session.get("consent_at") is not None
+
+        if doctor_done and (patient_done or not has_consent):
             log_system_event(
                 "reminder_service",
                 "members_add_already_done",
@@ -338,34 +350,75 @@ class ReminderService:
             return
         doctor_phone = session.get("clinic_phone")
         patient_phone = session.get("patient_phone")
-        if not doctor_phone or not patient_phone:
+        if not doctor_phone:
             log_system_event(
                 "reminder_service",
-                "members_add_missing_phone",
+                "members_add_missing_doctor_phone",
                 session_id=session_id,
             )
             return
 
-        success = await SferumClient.add_telemed_chat_members(
-            chat_id=chat_id,
-            doctor_phone=doctor_phone,
-            patient_phone=patient_phone,
-        )
-        if success:
-            self.db.update_chat_members_added(session_id)
+        # 1) Добавляем врача (admin), если ещё не добавлен
+        if not doctor_done:
+            doctor_ok = await SferumClient.add_doctor_as_admin(
+                chat_id=chat_id,
+                doctor_phone=doctor_phone,
+            )
+            if doctor_ok:
+                self.db.update_chat_doctor_added(session_id)
+                log_system_event(
+                    "reminder_service",
+                    "doctor_added_successfully",
+                    session_id=session_id,
+                    chat_id=chat_id,
+                )
+            else:
+                log_system_event(
+                    "reminder_service",
+                    "doctor_add_failed",
+                    session_id=session_id,
+                    chat_id=chat_id,
+                )
+
+        # 2) Пациента добавляем ТОЛЬКО после согласия
+        if not has_consent:
             log_system_event(
                 "reminder_service",
-                "members_added_successfully",
+                "patient_add_skipped_no_consent",
                 session_id=session_id,
                 chat_id=chat_id,
+                message="Пациент не добавлен в чат, т.к. согласие отсутствует",
             )
-        else:
+            return
+
+        if not patient_phone:
             log_system_event(
                 "reminder_service",
-                "members_add_failed",
+                "members_add_missing_patient_phone",
                 session_id=session_id,
-                chat_id=chat_id,
             )
+            return
+
+        if not patient_done:
+            patient_ok = await SferumClient.add_patient_as_member(
+                chat_id=chat_id,
+                patient_phone=patient_phone,
+            )
+            if patient_ok:
+                self.db.update_chat_patient_added(session_id)
+                log_system_event(
+                    "reminder_service",
+                    "patient_added_successfully",
+                    session_id=session_id,
+                    chat_id=chat_id,
+                )
+            else:
+                log_system_event(
+                    "reminder_service",
+                    "patient_add_failed",
+                    session_id=session_id,
+                    chat_id=chat_id,
+                )
     
     async def _send_reminder(self, session_id: str, reminder_type: str):
         """

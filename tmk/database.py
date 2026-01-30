@@ -65,6 +65,8 @@ class TelemedDatabase:
                         call_started_at TIMESTAMPTZ,
                         call_join_link TEXT,
                         chat_members_added_at TIMESTAMPTZ,
+                        chat_doctor_added_at TIMESTAMPTZ,
+                        chat_patient_added_at TIMESTAMPTZ,
                         
                         -- Напоминания
                         reminder_24h_at TIMESTAMPTZ,
@@ -121,6 +123,8 @@ class TelemedDatabase:
                 self._add_column_if_not_exists(cursor, "call_started_at", "TIMESTAMPTZ")
                 self._add_column_if_not_exists(cursor, "call_join_link", "TEXT")
                 self._add_column_if_not_exists(cursor, "chat_members_added_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "chat_doctor_added_at", "TIMESTAMPTZ")
+                self._add_column_if_not_exists(cursor, "chat_patient_added_at", "TIMESTAMPTZ")
                 
                 # Напоминания
                 self._add_column_if_not_exists(cursor, "reminder_24h_at", "TIMESTAMPTZ")
@@ -502,6 +506,70 @@ class TelemedDatabase:
             self.conn.rollback()
             return False
 
+    def update_chat_doctor_added(self, session_id: str) -> bool:
+        """Маркер: врач добавлен в телемед-чат."""
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE telemed_sessions
+                    SET chat_doctor_added_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (session_id,),
+                )
+                updated = cursor.rowcount > 0
+                self.conn.commit()
+                if updated:
+                    log_system_event(
+                        "tmk_database",
+                        "chat_doctor_added_updated",
+                        session_id=session_id,
+                    )
+                return updated
+        except psycopg2.Error as e:
+            log_system_event(
+                "tmk_database",
+                "chat_doctor_added_update_error",
+                error=str(e),
+            )
+            self.conn.rollback()
+            return False
+
+    def update_chat_patient_added(self, session_id: str) -> bool:
+        """Маркер: пациент добавлен в телемед-чат."""
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE telemed_sessions
+                    SET chat_patient_added_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (session_id,),
+                )
+                updated = cursor.rowcount > 0
+                self.conn.commit()
+                if updated:
+                    log_system_event(
+                        "tmk_database",
+                        "chat_patient_added_updated",
+                        session_id=session_id,
+                    )
+                return updated
+        except psycopg2.Error as e:
+            log_system_event(
+                "tmk_database",
+                "chat_patient_added_update_error",
+                error=str(e),
+            )
+            self.conn.rollback()
+            return False
+
     def get_pending_reminders(self) -> List[Dict[str, Any]]:
         """
         Получение всех неотправленных напоминаний для загрузки в очередь
@@ -522,7 +590,9 @@ class TelemedDatabase:
                           OR
                           (call_started_at IS NULL AND schedule_date > NOW())
                           OR
-                          (chat_members_added_at IS NULL AND schedule_date > NOW())
+                          (chat_doctor_added_at IS NULL AND schedule_date > NOW())
+                          OR
+                          (consent_at IS NOT NULL AND chat_patient_added_at IS NULL AND schedule_date > NOW())
                       )
                     ORDER BY schedule_date ASC
                 """)

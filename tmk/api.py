@@ -134,7 +134,9 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             
             # 3. Расчёт времени напоминаний
             reminder_24h_at = schedule_date - timedelta(hours=24)
-            reminder_15m_at = schedule_date - timedelta(minutes=15)
+            # Важно: напоминание пациенту со ссылкой/без ссылки отправляем за 5 минут
+            # (поле БД называется reminder_15m_at, но теперь хранит время -5 минут)
+            reminder_15m_at = schedule_date - timedelta(minutes=5)
             
             # 4. Поиск пациента по телефону
             patient_phone = normalize_phone(
@@ -208,37 +210,8 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="MAX API error"
                 )
             
-            # 6.1. Добавление врача и пациента в чат (teacher/admin и student/member)
-            members_added = False
-            try:
-                members_added = await SferumClient.add_telemed_chat_members(
-                    chat_id=chat_data["chat_id"],
-                    doctor_phone=request.clinic.phone,
-                    patient_phone=patient_phone,
-                )
-            except Exception as e:
-                log_system_event(
-                    "tmk_api",
-                    "add_chat_members_error",
-                    external_id=request.externalId,
-                    error=str(e)
-                )
-                members_added = False
-
-            if not members_added:
-                log_system_event(
-                    "tmk_api",
-                    "add_chat_members_failed",
-                    external_id=request.externalId,
-                    chat_id=chat_data["chat_id"],
-                )
-                return TelemedCreateResponse(
-                    status="error",
-                    id="",
-                    externalId=request.externalId,
-                    message="Не удалось добавить участников в чат. Консультация не создана.",
-                    error="Chat members assignment failed"
-                )
+            # 6.1. Важно: добавление врача/пациента в чат выполняется не сразу,
+            # а по расписанию (за 15 минут, с повторами ближе к консультации).
             
             # 7. Подготовка данных для БД
             session_data = {
@@ -285,8 +258,12 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
                     error="Database error"
                 )
             
-            # 9. Добавление напоминаний и события «создать звонок» в очередь
+            # 9. Добавление напоминаний и технических событий в очередь
             now = datetime.now(MOSCOW_TZ)
+            members_add_at_15m = schedule_date - timedelta(minutes=15)
+            members_add_at_5m = schedule_date - timedelta(minutes=5)
+            members_add_at_2m = schedule_date - timedelta(minutes=2)
+            call_start_at_2m = schedule_date - timedelta(minutes=2)
             
             if reminder_24h_at > now:
                 await reminder_service.add_reminder(session_id, '24h', reminder_24h_at)
@@ -294,8 +271,18 @@ def create_tmk_app(bot, tmk_database: TelemedDatabase, reminder_svc: ReminderSer
             if reminder_15m_at > now:
                 await reminder_service.add_reminder(session_id, '15m', reminder_15m_at)
             
-            if schedule_date > now:
-                await reminder_service.add_reminder(session_id, 'call_start', schedule_date)
+            # Добавление участников в чат: основная попытка за 15 минут,
+            # и повторы ближе к консультации (за 5 и 2 минуты)
+            if members_add_at_15m > now:
+                await reminder_service.add_reminder(session_id, 'members_add', members_add_at_15m)
+            if members_add_at_5m > now:
+                await reminder_service.add_reminder(session_id, 'members_add', members_add_at_5m)
+            if members_add_at_2m > now:
+                await reminder_service.add_reminder(session_id, 'members_add', members_add_at_2m)
+
+            # Создание звонка за 2 минуты до консультации
+            if call_start_at_2m > now:
+                await reminder_service.add_reminder(session_id, 'call_start', call_start_at_2m)
             
             # 10. Отправка первого сообщения пациенту
             if user_id:

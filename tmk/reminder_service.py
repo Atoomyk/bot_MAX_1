@@ -79,25 +79,38 @@ class ReminderService:
         loaded_count = 0
         for session in sessions:
             session_id = str(session['id'])
+            now = datetime.now(MOSCOW_TZ)
             
             # Добавляем напоминание за 24 часа
             if session['reminder_24h_sent_at'] is None and session['reminder_24h_at']:
-                if session['reminder_24h_at'] > datetime.now(MOSCOW_TZ):
+                if session['reminder_24h_at'] > now:
                     await self.add_reminder(session_id, '24h', session['reminder_24h_at'])
                     loaded_count += 1
             
-            # Добавляем напоминание за 15 минут
+            # Добавляем напоминание за 5 минут (в БД хранится в reminder_15m_at)
             if session['reminder_15m_sent_at'] is None and session['reminder_15m_at']:
-                if session['reminder_15m_at'] > datetime.now(MOSCOW_TZ):
+                if session['reminder_15m_at'] > now:
                     await self.add_reminder(session_id, '15m', session['reminder_15m_at'])
                     loaded_count += 1
 
-            # Добавляем событие «создать звонок» в момент schedule_date
+            # Добавляем событие «добавить участников» (врач/пациент) за 15 минут,
+            # с повторами за 5 и 2 минуты до консультации
             schedule_date = session.get('schedule_date')
+            chat_members_added_at = session.get('chat_members_added_at')
+            if schedule_date and chat_members_added_at is None:
+                for minutes_before in (15, 5, 2):
+                    members_add_at = schedule_date - timedelta(minutes=minutes_before)
+                    if members_add_at > now:
+                        await self.add_reminder(session_id, 'members_add', members_add_at)
+                        loaded_count += 1
+
+            # Добавляем событие «создать звонок» за 2 минуты до консультации
             call_started_at = session.get('call_started_at')
-            if schedule_date and call_started_at is None and schedule_date > datetime.now(MOSCOW_TZ):
-                await self.add_reminder(session_id, 'call_start', schedule_date)
-                loaded_count += 1
+            if schedule_date and call_started_at is None:
+                call_start_at = schedule_date - timedelta(minutes=2)
+                if call_start_at > now:
+                    await self.add_reminder(session_id, 'call_start', call_start_at)
+                    loaded_count += 1
         
         log_system_event(
             "reminder_service",
@@ -112,7 +125,7 @@ class ReminderService:
         
         Args:
             session_id: UUID сессии
-            reminder_type: Тип ('24h', '15m' или 'call_start')
+            reminder_type: Тип ('24h', '15m', 'members_add' или 'call_start')
             send_at: Время отправки
         """
         # Преобразуем в timestamp для сортировки в очереди
@@ -182,6 +195,8 @@ class ReminderService:
                     if session:
                         if reminder_type == 'call_start':
                             already_done = session.get('call_started_at') is not None
+                        elif reminder_type == 'members_add':
+                            already_done = session.get('chat_members_added_at') is not None
                         else:
                             already_done = session.get(f'reminder_{reminder_type}_sent_at') is not None
                     if session and not already_done:
@@ -205,6 +220,8 @@ class ReminderService:
                 
                 if reminder_type == 'call_start':
                     await self._start_telemed_call(session_id)
+                elif reminder_type == 'members_add':
+                    await self._add_telemed_chat_members(session_id)
                 else:
                     await self._send_reminder(session_id, reminder_type)
                 
@@ -272,6 +289,80 @@ class ReminderService:
             log_system_event(
                 "reminder_service",
                 "call_start_failed",
+                session_id=session_id,
+                chat_id=chat_id,
+            )
+
+    async def _add_telemed_chat_members(self, session_id: str):
+        """
+        Добавление врача и пациента в чат ТМК (educationSchool.addChatUsers).
+        Запускается по событию members_add (за 15 минут, с повторами ближе к консультации).
+
+        Args:
+            session_id: UUID сессии
+        """
+        log_system_event(
+            "reminder_service",
+            "adding_telemed_chat_members",
+            session_id=session_id,
+        )
+        session = self.db.get_session_by_id(session_id)
+        if not session:
+            log_system_event(
+                "reminder_service",
+                "members_add_session_not_found",
+                session_id=session_id,
+            )
+            return
+        if session["status"] == "CANCELLED":
+            log_system_event(
+                "reminder_service",
+                "members_add_session_cancelled",
+                session_id=session_id,
+            )
+            return
+        if session.get("chat_members_added_at") is not None:
+            log_system_event(
+                "reminder_service",
+                "members_add_already_done",
+                session_id=session_id,
+            )
+            return
+        chat_id = session.get("chat_id")
+        if not chat_id:
+            log_system_event(
+                "reminder_service",
+                "members_add_no_chat_id",
+                session_id=session_id,
+            )
+            return
+        doctor_phone = session.get("clinic_phone")
+        patient_phone = session.get("patient_phone")
+        if not doctor_phone or not patient_phone:
+            log_system_event(
+                "reminder_service",
+                "members_add_missing_phone",
+                session_id=session_id,
+            )
+            return
+
+        success = await SferumClient.add_telemed_chat_members(
+            chat_id=chat_id,
+            doctor_phone=doctor_phone,
+            patient_phone=patient_phone,
+        )
+        if success:
+            self.db.update_chat_members_added(session_id)
+            log_system_event(
+                "reminder_service",
+                "members_added_successfully",
+                session_id=session_id,
+                chat_id=chat_id,
+            )
+        else:
+            log_system_event(
+                "reminder_service",
+                "members_add_failed",
                 session_id=session_id,
                 chat_id=chat_id,
             )

@@ -8,6 +8,8 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
+import psycopg2
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +62,8 @@ class AppointmentsDatabase:
             self._add_column_if_not_exists('status', "VARCHAR(20) DEFAULT 'active'")
             self._add_column_if_not_exists('cancelled_at', 'TIMESTAMP NULL')
             self._add_column_if_not_exists('cancelled_by', 'VARCHAR(50) NULL')
+            self._add_column_if_not_exists('book_id_mis', 'TEXT NULL')
+            self._add_column_if_not_exists('reminder_24h_sent_at', 'TIMESTAMP NULL')
             
             # Обновляем существующие записи: устанавливаем status = 'active'
             try:
@@ -75,11 +79,31 @@ class AppointmentsDatabase:
                     self.conn.rollback()
 
             # Создание индексов
+            # ВАЖНО: ранее idx_appointments_user_visit_mo был UNIQUE, что приводило к блокировке сохранения
+            # при наличии записи, созданной самим ботом, даже если Book_Id_Mis отличается.
+            # Сейчас уникальность обеспечивается (user_id, book_id_mis), поэтому этот индекс делаем не-уникальным.
+            try:
+                self.cursor.execute(
+                    """
+                    SELECT indexdef
+                    FROM pg_indexes
+                    WHERE tablename = 'appointments'
+                      AND indexname = 'idx_appointments_user_visit_mo'
+                    """
+                )
+                row = self.cursor.fetchone()
+                if row and row[0] and 'UNIQUE' in row[0].upper():
+                    self.cursor.execute("DROP INDEX IF EXISTS idx_appointments_user_visit_mo")
+                    self.conn.commit()
+            except Exception as e:
+                logger.warning(f"Не удалось проверить/удалить UNIQUE индекс idx_appointments_user_visit_mo: {e}")
+                if self.conn:
+                    self.conn.rollback()
+
             indexes = [
                 ("idx_appointments_user_id", "appointments (user_id)"),
                 ("idx_appointments_user_visit_mo",
-                 "appointments (user_id, external_visit_time, external_mo_name)",
-                 True),  # UNIQUE индекс
+                 "appointments (user_id, external_visit_time, external_mo_name)"),
                 ("idx_appointments_visit_time", "appointments (external_visit_time)"),
                 ("idx_appointments_created_at", "appointments (created_at)"),
                 ("idx_appointments_status", "appointments (user_id, status)")
@@ -130,8 +154,29 @@ class AppointmentsDatabase:
             logger.error(f"Ошибка проверки существования записи: {e}")
             return False
 
+    def appointment_exists_by_book_id_mis(self, user_id: int, book_id_mis: str) -> bool:
+        """
+        Проверяет, существует ли уже запись с таким же Book_Id_Mis.
+        Это главный ключ дедупликации для записей из МИС.
+        """
+        try:
+            if not book_id_mis:
+                return False
+            query = """
+            SELECT 1 FROM appointments
+            WHERE user_id = %s
+              AND book_id_mis = %s
+              AND status = 'active'
+            LIMIT 1
+            """
+            self.cursor.execute(query, (user_id, book_id_mis))
+            return self.cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Ошибка проверки существования записи по book_id_mis: {e}")
+            return False
+
     def add_appointment(self, user_id: int, appointment_data: Dict[str, Any],
-                        visit_time: datetime, mo_name: str) -> bool:
+                        visit_time: datetime, mo_name: str) -> Dict[str, Any]:
         """
         Добавляет новую запись к врачу.
         ВАЖНО: Проверяет существование пользователя в таблице users перед вставкой.
@@ -143,41 +188,183 @@ class AppointmentsDatabase:
             mo_name: Название мед учреждения
 
         Returns:
-            True если запись успешно добавлена
+            dict:
+            - success: bool
+            - inserted: bool (True если создана новая строка, False если обновили существующую)
+            - id: Optional[int] (id строки в БД, если смогли получить)
         """
         try:
             # Проверка существования пользователя в users
             self.cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
             if not self.cursor.fetchone():
                 logger.warning(f"Пропуск добавления записи: пользователь user_id={user_id} не найден в базе")
-                return False  # пользователь не зарегистрирован
+                return {"success": False, "inserted": False, "id": None}  # пользователь не зарегистрирован
             
             # Преобразуем данные в JSON
             appointment_json = json.dumps(appointment_data, ensure_ascii=False)
 
+            book_id_mis = appointment_data.get("Book_Id_Mis")
+            if isinstance(book_id_mis, str):
+                book_id_mis = book_id_mis.strip() or None
+
+            # Если есть Book_Id_Mis — это главный ключ уникальности (upsert)
+            if book_id_mis:
+                try:
+                    query = """
+                    INSERT INTO appointments
+                        (user_id, appointment_json, book_id_mis, external_visit_time, external_mo_name, status)
+                    VALUES
+                        (%s, %s, %s, %s, %s, 'active')
+                    ON CONFLICT (user_id, book_id_mis)
+                    DO UPDATE SET
+                        appointment_json = COALESCE(appointments.appointment_json, '{}'::jsonb) || EXCLUDED.appointment_json,
+                        external_visit_time = COALESCE(EXCLUDED.external_visit_time, appointments.external_visit_time),
+                        external_mo_name = COALESCE(EXCLUDED.external_mo_name, appointments.external_mo_name),
+                        status = 'active',
+                        cancelled_at = NULL
+                    RETURNING (xmax = 0) AS inserted, id
+                    """
+                    self.cursor.execute(query, (user_id, appointment_json, book_id_mis, visit_time, mo_name))
+                    row = self.cursor.fetchone()
+                    self.conn.commit()
+                    inserted = bool(row[0]) if row else False
+                    row_id = int(row[1]) if row and row[1] is not None else None
+                    if inserted:
+                        logger.info(f"Добавлена новая запись для user_id={user_id}, book_id_mis={book_id_mis}")
+                    else:
+                        logger.debug(f"Запись обновлена/уже существовала для user_id={user_id}, book_id_mis={book_id_mis}")
+                    return {"success": True, "inserted": inserted, "id": row_id}
+                except psycopg2.IntegrityError as e:
+                    # Частый кейс: в БД уже есть запись с тем же (user_id, external_visit_time, external_mo_name),
+                    # но пришел другой/обновленный Book_Id_Mis из МИС.
+                    # Уникальный индекс idx_appointments_user_visit_mo блокирует вставку -> мерджим в существующую строку.
+                    constraint = getattr(getattr(e, "diag", None), "constraint_name", None)
+                    pgcode = getattr(e, "pgcode", None)
+                    if pgcode == "23505" and constraint == "idx_appointments_user_visit_mo":
+                        if self.conn:
+                            self.conn.rollback()
+                        try:
+                            self.cursor.execute(
+                                """
+                                SELECT id, book_id_mis
+                                FROM appointments
+                                WHERE user_id = %s
+                                  AND external_visit_time = %s
+                                  AND external_mo_name = %s
+                                LIMIT 1
+                                """,
+                                (user_id, visit_time, mo_name),
+                            )
+                            row = self.cursor.fetchone()
+                            if not row:
+                                return {"success": False, "inserted": False, "id": None, "error": str(e)}
+
+                            existing_id = int(row[0])
+                            existing_book_id = row[1]
+
+                            # Если Book_Id_Mis отличается — сохраняем старый в JSON для отладки
+                            merge_patch = dict(appointment_data)
+                            if existing_book_id and str(existing_book_id) != str(book_id_mis):
+                                merge_patch.setdefault("Book_Id_Mis_Original", str(existing_book_id))
+
+                            patch_json = json.dumps(merge_patch, ensure_ascii=False)
+
+                            # Обновляем существующую строку и проставляем актуальный book_id_mis
+                            self.cursor.execute(
+                                """
+                                UPDATE appointments
+                                SET appointment_json = COALESCE(appointment_json, '{}'::jsonb) || %s::jsonb,
+                                    book_id_mis = %s,
+                                    status = 'active',
+                                    cancelled_at = NULL
+                                WHERE id = %s
+                                RETURNING id
+                                """,
+                                (patch_json, str(book_id_mis), existing_id),
+                            )
+                            upd = self.cursor.fetchone()
+                            self.conn.commit()
+                            updated_id = int(upd[0]) if upd and upd[0] is not None else existing_id
+                            logger.info(
+                                "Сопоставили запись по (user_id, visit_time, mo_name) и обновили book_id_mis: user_id=%s, id=%s",
+                                user_id,
+                                updated_id,
+                            )
+                            return {"success": True, "inserted": False, "id": updated_id}
+                        except Exception as inner:
+                            logger.error(f"Ошибка мерджа записи при конфликте idx_appointments_user_visit_mo: {inner}")
+                            if self.conn:
+                                self.conn.rollback()
+                            return {"success": False, "inserted": False, "id": None, "error": str(inner)}
+
+                    # Любая другая integrity-ошибка
+                    if self.conn:
+                        self.conn.rollback()
+                    return {"success": False, "inserted": False, "id": None, "error": str(e)}
+
+            # Fallback: старый ключ (встречается если МИС не прислала Book_Id_Mis)
             query = """
             INSERT INTO appointments 
-            (user_id, appointment_json, external_visit_time, external_mo_name, status)
-            VALUES (%s, %s, %s, %s, 'active')
+                (user_id, appointment_json, external_visit_time, external_mo_name, status)
+            VALUES
+                (%s, %s, %s, %s, 'active')
             ON CONFLICT (user_id, external_visit_time, external_mo_name) 
             DO NOTHING
+            RETURNING id
             """
-
             self.cursor.execute(query, (user_id, appointment_json, visit_time, mo_name))
+            row = self.cursor.fetchone()
             self.conn.commit()
-
-            if self.cursor.rowcount > 0:
+            if row:
+                row_id = int(row[0])
                 logger.info(f"Добавлена новая запись для user_id={user_id}, время={visit_time}")
-                return True
-            else:
-                logger.debug(f"Запись уже существует для user_id={user_id}, время={visit_time}")
-                return False
+                return {"success": True, "inserted": True, "id": row_id}
+            logger.debug(f"Запись уже существует для user_id={user_id}, время={visit_time}")
+            return {"success": True, "inserted": False, "id": None}
 
         except Exception as e:
             logger.error(f"Ошибка добавления записи: {e}")
             if self.conn:
                 self.conn.rollback()
-            return False
+            return {"success": False, "inserted": False, "id": None, "error": str(e)}
+
+    def get_reminder_24h_sent_at(self, appointment_id: int) -> Optional[datetime]:
+        try:
+            self.cursor.execute(
+                "SELECT reminder_24h_sent_at FROM appointments WHERE id = %s",
+                (appointment_id,)
+            )
+            row = self.cursor.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            logger.warning(f"Не удалось получить reminder_24h_sent_at для записи {appointment_id}: {e}")
+            return None
+
+    def mark_reminder_24h_sent(self, appointment_ids: List[int]) -> int:
+        """
+        Проставляет reminder_24h_sent_at = NOW() для набора записей (если еще не проставлено).
+        Возвращает количество обновленных строк.
+        """
+        if not appointment_ids:
+            return 0
+        try:
+            self.cursor.execute(
+                """
+                UPDATE appointments
+                SET reminder_24h_sent_at = NOW()
+                WHERE id = ANY(%s)
+                  AND reminder_24h_sent_at IS NULL
+                """,
+                (appointment_ids,),
+            )
+            updated = self.cursor.rowcount or 0
+            self.conn.commit()
+            return updated
+        except Exception as e:
+            logger.warning(f"Не удалось проставить reminder_24h_sent_at: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return 0
 
     def get_user_appointments(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -230,7 +417,7 @@ class AppointmentsDatabase:
         """
         try:
             query = """
-            SELECT id, user_id, external_visit_time, external_mo_name
+            SELECT id, user_id, book_id_mis, external_visit_time, external_mo_name
             FROM appointments 
             WHERE status = 'active' AND external_visit_time >= NOW()
             """
@@ -243,8 +430,9 @@ class AppointmentsDatabase:
                 appointments.append({
                     'id': row[0],
                     'user_id': row[1],
-                    'visit_time': row[2],
-                    'mo_name': row[3]
+                    'book_id_mis': row[2],
+                    'visit_time': row[3],
+                    'mo_name': row[4]
                 })
             return appointments
             

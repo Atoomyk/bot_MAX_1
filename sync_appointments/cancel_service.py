@@ -6,6 +6,7 @@
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -18,9 +19,10 @@ class CancelService:
     Отправляет SOAP-запрос CancelAppointmentRequest во внешнюю систему.
     """
 
-    # TODO: заменить значения на реальные параметры интеграции
-    # Эндпоинт из рабочего примера (можете переопределить через __init__)
-    SOAP_ENDPOINT_URL = "http://192.168.240.26:8759/ws/rosminzdrav/fer3N/erwebservice_cc"
+    # Берём endpoint из .env (SOAP_URL), чтобы отмена шла в тот же контур (тест/прод),
+    # что и создание записи.
+    # Fallback оставлен для старых конфигураций.
+    SOAP_ENDPOINT_URL = os.getenv("SOAP_URL") or "http://192.168.240.26:8759/ws/rosminzdrav/fer3N/erwebservice_cc"
     # В рабочем примере SOAPAction не требовался, оставляем пустым
     SOAP_ACTION = ""
     DEFAULT_REASON = "CANCELED_BY_PATIENT"  # из предоставленного запроса

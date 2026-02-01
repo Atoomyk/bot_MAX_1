@@ -1073,7 +1073,8 @@ async def handle_callback(bot, user_id, chat_id, payload):
         
         try:
             xml = await SoapClient.book_appointment(ctx.session_id, slot_id)
-            success = SoapResponseParser.parse_booking_status(xml)
+            details = SoapResponseParser.parse_create_appointment_details(xml)
+            success = (details.get("status_code") or "").strip().upper() == "SUCCESS"
         except Exception as e:
             await handle_soap_error(bot, user_id, chat_id, str(e), ctx)
             return
@@ -1084,6 +1085,8 @@ async def handle_callback(bot, user_id, chat_id, payload):
             # Повторно достаем имя МО для красивого ответа
             mos = cache.get('mos', [])
             mo_name = next((m['name'] for m in mos if m['id'] == ctx.selected_mo_id), "Выбранная МО")
+            selected_mo = next((m for m in mos if m.get('id') == ctx.selected_mo_id), None)
+            mo_address = (selected_mo or {}).get("address", "") or ""
             from visit_a_doctor.specialties_MO import Abbreviations_MO
             mo_name_short = Abbreviations_MO.get(mo_name, mo_name)
             
@@ -1105,22 +1108,30 @@ async def handle_callback(bot, user_id, chat_id, payload):
                 # Определяем источник записи
                 booking_src = "self_bot" if ctx.selected_person == "me" else "other_bot"
                 
-                visit_dt = f"{ctx.selected_date} {ctx.selected_time}"
-                
+                # В ответе РМИС обычно возвращает Visit_Time/Room/Book_Id_Mis.
+                # Сохраняем единым форматом (как в синхронизации) с русскими ключами.
+                visit_time_str = details.get("visit_time") or f"{ctx.selected_date} {ctx.selected_time}:00"
+                room_str = details.get("room") or getattr(ctx, "selected_room", "") or ""
+                book_id_mis = details.get("book_id_mis") or ""
+
                 appointment_data = {
-                    "mo_name": mo_name,
-                    "doctor_name": ctx.selected_doctor_name,
-                    "specialty": ctx.selected_spec,
-                    "room_number": ctx.selected_room,
-                    "visit_date": ctx.selected_date,
-                    "visit_time": ctx.selected_time,
-                    "start_time": visit_dt, # Используется db.add_appointment для external_visit_time
-                    "patient_fio": getattr(ctx, 'patient_fio', ''),
-                    "patient_birthdate": getattr(ctx, 'patient_birthdate', ''),
-                    "patient_snils": getattr(ctx, 'patient_snils', ''),
-                    "patient_oms": getattr(ctx, 'patient_oms', ''),
-                    "patient_gender": getattr(ctx, 'patient_gender', ''),
-                    "slot_id": slot_id
+                    # Канонические ключи (как в sync_appointments/parser.py)
+                    "Дата записи": visit_time_str,
+                    "Мед учреждение": mo_name,
+                    "Адрес мед учреждения": mo_address,
+                    "ФИО врача": getattr(ctx, "selected_doctor_name", "") or "",
+                    "Должность врача": getattr(ctx, "selected_spec", "") or "",
+                    "Book_Id_Mis": book_id_mis,
+                    "Slot_Id": slot_id,
+                    "Room": room_str,
+                    # Доп. данные (для отладки/унификации)
+                    "Исходные_данные": {
+                        "ФИО пациента": getattr(ctx, "patient_fio", "") or "",
+                        "Дата рождения": getattr(ctx, "patient_birthdate", "") or "",
+                        "СНИЛС": getattr(ctx, "patient_snils", "") or "",
+                        "ОМС": getattr(ctx, "patient_oms", "") or "",
+                        "Пол": getattr(ctx, "patient_gender", "") or "",
+                    },
                 }
                 db.add_appointment(user_id, appointment_data, booking_source=booking_src)
             except Exception as e:

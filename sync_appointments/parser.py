@@ -91,15 +91,15 @@ class Parser:
         """
         try:
             # Извлекаем основные поля
-            last_name = record.get('Last_Name', '').strip()
-            first_name = record.get('First_Name', '').strip()
-            middle_name = record.get('Middle_Name', '').strip()
-            birth_date = record.get('Birth_Date', '')
-            mobile_phone = record.get('Mobile_Phone', '')
-            mo_name = record.get('MO_Name', '').strip()
-            mo_address = record.get('MO_Adress', '').strip()
-            specialist_name = record.get('Specialist_Name', '').strip()
-            visit_time_str = record.get('VisitTime', '')
+            last_name = (record.get('Last_Name') or '').strip()
+            first_name = (record.get('First_Name') or '').strip()
+            middle_name = (record.get('Middle_Name') or '').strip()
+            birth_date = record.get('Birth_Date') or ''
+            mobile_phone = record.get('Mobile_Phone') or ''
+            mo_name = (record.get('MO_Name') or '').strip()
+            mo_address = (record.get('MO_Adress') or '').strip()
+            specialist_name = (record.get('Specialist_Name') or '').strip()
+            visit_time_str = record.get('VisitTime') or ''
             
             # Извлекаем дополнительные поля для сохранения в appointment_json
             book_id_mis = record.get('Book_Id_Mis', '')

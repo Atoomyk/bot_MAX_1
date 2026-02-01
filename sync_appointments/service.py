@@ -118,61 +118,72 @@ class SyncService:
 
                 logger.debug(f"Уведомления включены для пользователя {user_id}")
 
-                # Проверяем, не существует ли уже такая запись
-                if self.appointments_db.appointment_exists(user_id, visit_time, mo_name):
-                    logger.warning(f"Запись уже существует для user_id={user_id}, время={visit_time}, МО={mo_name}")
-                    skipped_already_exists += 1
-                    continue
-
-                logger.debug(f"Запись не найдена в БД, сохраняем...")
-
                 # Сохраняем запись в БД
-                success = self.appointments_db.add_appointment(
+                save_result = self.appointments_db.add_appointment(
                     user_id=user_id,
                     appointment_data=appointment_data,
                     visit_time=visit_time,
                     mo_name=mo_name
                 )
 
-                if success:
+                if not save_result.get('success'):
+                    logger.warning(f"✗ Не удалось сохранить запись для user_id={user_id}: {save_result.get('error')}")
+                    continue
+
+                db_id = save_result.get('id') or self._get_last_inserted_id(
+                    user_id,
+                    visit_time,
+                    mo_name,
+                    book_id_mis=appointment_data.get('Book_Id_Mis')
+                )
+
+                if save_result.get('inserted'):
                     logger.info(f"✓ Запись успешно сохранена для user_id={user_id}")
                     total_saved += 1
-
-                    # Получаем ID сохраненной записи для кнопки отмены
-                    db_id = self._get_last_inserted_id(user_id, visit_time, mo_name)
                     if db_id:
                         added_appointment_ids.add(db_id)
+                else:
+                    skipped_already_exists += 1
 
-                    # Добавляем в список для уведомлений
-                    if user_id not in user_new_appointments:
-                        user_new_appointments[user_id] = []
+                # --- Отправка "напоминания" один раз за сутки до приема ---
+                # Даже если запись уже была в БД (например, создана самим ботом),
+                # уведомление должно прийти один раз, если еще не отправлялось.
+                if db_id:
+                    already_sent = self.appointments_db.get_reminder_24h_sent_at(db_id) is not None
+                    if not already_sent:
+                        if user_id not in user_new_appointments:
+                            user_new_appointments[user_id] = []
 
-                    # Получаем ВСЕ данные для уведомления (как в force_sync_with_mock)
-                    user_new_appointments[user_id].append({
-                        # ID записи в БД для кнопки отмены
-                        'db_id': db_id,
-                        # Данные для отображения
-                        'matching_data': patient_data.get('matching_data', {}),
-                        'appointment_data': appointment_data,
-                        'metadata': metadata,
-                        # Добавляем оригинальные поля для простоты доступа
-                        'patient_fio': patient_data.get('matching_data', {}).get('full_fio', 'не указано'),
-                        'visit_time': visit_time,
-                        'mo_name': mo_name,
-                        'mo_address': appointment_data.get('Адрес мед учреждения', 'не указано'),
-                        'doctor_fio': appointment_data.get('ФИО врача', 'не указано'),
-                        'doctor_position': appointment_data.get('Должность врача', 'не указано')
-                    })
+                        user_new_appointments[user_id].append({
+                            'db_id': db_id,
+                            'matching_data': patient_data.get('matching_data', {}),
+                            'appointment_data': appointment_data,
+                            'metadata': metadata,
+                            'patient_fio': patient_data.get('matching_data', {}).get('full_fio', 'не указано'),
+                            'visit_time': visit_time,
+                            'mo_name': mo_name,
+                            'mo_address': appointment_data.get('Адрес мед учреждения', 'не указано'),
+                            'doctor_fio': appointment_data.get('ФИО врача', 'не указано'),
+                            'doctor_position': appointment_data.get('Должность врача', 'не указано')
+                        })
 
             # 4.1. Проверка отмененных записей (которые есть в БД, но нет в ответе МИС)
             logger.info("4.1. Проверка удаленных в МИС записей...")
             
-            # Собираем множество всех полученных записей (user_id, visit_time, mo_name)
-            
+            # Собираем множества всех полученных записей:
+            # 1) Основное: (user_id, book_id_mis) — самый надежный ключ
+            # 2) Fallback: (user_id, visit_time, mo_name) — если book_id_mis отсутствует
+            rmis_book_ids_set = set()
             rmis_appointments_set = set()
             for match in matched_records:
                 u_id = match['user_id']
-                m_data = match['patient_data']['metadata']
+                p_data = match['patient_data']
+                m_data = p_data.get('metadata', {})
+                a_data = p_data.get('appointment_data', {}) or {}
+
+                book_id_mis = a_data.get('Book_Id_Mis')
+                if book_id_mis:
+                    rmis_book_ids_set.add((u_id, str(book_id_mis)))
                 
                 # Приводим дату к строке без микросекунд для надежного сравнения
                 # Если в БД timestamp без зоны, а в парсере naive datetime - должно совпасть
@@ -198,25 +209,35 @@ class SyncService:
                 if app_id in added_appointment_ids:
                     continue
 
-                local_visit_time = local_app['visit_time']
-                
-                if isinstance(local_visit_time, str):
-                     local_visit_time_str = local_visit_time
-                elif local_visit_time:
-                     local_visit_time_str = local_visit_time.replace(microsecond=0).isoformat()
+                local_book_id_mis = local_app.get('book_id_mis')
+
+                # Основной путь: сравнение по Book_Id_Mis
+                if local_book_id_mis:
+                    local_key = (local_app['user_id'], str(local_book_id_mis))
+                    missing_in_rmis = local_key not in rmis_book_ids_set
+                    debug_keys_sample = list(rmis_book_ids_set)[:3]
                 else:
-                     continue # Некорректная запись в БД
-                
-                local_key = (local_app['user_id'], local_visit_time_str, local_app['mo_name'])
-                
+                    # Fallback: сравнение по (время, МО)
+                    local_visit_time = local_app['visit_time']
+                    if isinstance(local_visit_time, str):
+                        local_visit_time_str = local_visit_time
+                    elif local_visit_time:
+                        local_visit_time_str = local_visit_time.replace(microsecond=0).isoformat()
+                    else:
+                        continue  # Некорректная запись в БД
+
+                    local_key = (local_app['user_id'], local_visit_time_str, local_app['mo_name'])
+                    missing_in_rmis = local_key not in rmis_appointments_set
+                    debug_keys_sample = list(rmis_appointments_set)[:3]
+
                 # Если локальной записи нет в множестве записей из МИС -> она удалена
-                if local_key not in rmis_appointments_set:
+                if missing_in_rmis:
                     u_id = local_app['user_id']
                     
                     logger.warning(f"Обнаружена удаленная в МИС запись: id={app_id}, user={u_id}")
                     # Логируем детали для отладки (повышаем уровень до WARNING, чтобы видеть в консоли юзера)
                     logger.warning(f"  > Ключ локальный: {local_key}")
-                    logger.warning(f"  > Ключи МИС (первые 3): {list(rmis_appointments_set)[:3]}")
+                    logger.warning(f"  > Ключи МИС (первые 3): {debug_keys_sample}")
                     
                     # Отменяем локально
                     cancel_result = self.appointments_db.cancel_appointment(
@@ -246,6 +267,23 @@ class SyncService:
                         continue
 
                 notification_results = await self.notifier.send_batch_notifications(user_appointments_int)
+
+                # Если уведомление реально отправлено — проставляем reminder_24h_sent_at
+                try:
+                    details = (notification_results or {}).get('details', {}) or {}
+                    for uid_str, status in details.items():
+                        if status != 'sent':
+                            continue
+                        try:
+                            uid_int = int(uid_str)
+                        except ValueError:
+                            continue
+                        apps = user_appointments_int.get(uid_int, [])
+                        ids_to_mark = [a.get('db_id') for a in apps if a.get('db_id')]
+                        if ids_to_mark:
+                            self.appointments_db.mark_reminder_24h_sent(ids_to_mark)
+                except Exception as e:
+                    logger.warning(f"Не удалось отметить отправленные напоминания: {e}")
             else:
                 logger.info("Нет новых записей для уведомлений")
 
@@ -275,7 +313,7 @@ class SyncService:
             logger.error(error_msg, exc_info=True)
             return self._create_error_result(error_msg, start_time)
 
-    def _get_last_inserted_id(self, user_id: str, visit_time: datetime, mo_name: str) -> Optional[int]:
+    def _get_last_inserted_id(self, user_id: str, visit_time: datetime, mo_name: str, book_id_mis: Optional[str] = None) -> Optional[int]:
         """
         Получает ID последней вставленной записи.
 
@@ -288,16 +326,27 @@ class SyncService:
             ID записи или None
         """
         try:
-            query = """
-            SELECT id FROM appointments 
-            WHERE user_id = %s 
-            AND external_visit_time = %s 
-            AND external_mo_name = %s
-            AND status = 'active'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """
-            self.appointments_db.cursor.execute(query, (user_id, visit_time, mo_name))
+            if book_id_mis:
+                query = """
+                SELECT id FROM appointments
+                WHERE user_id = %s
+                  AND book_id_mis = %s
+                  AND status = 'active'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+                self.appointments_db.cursor.execute(query, (user_id, str(book_id_mis)))
+            else:
+                query = """
+                SELECT id FROM appointments 
+                WHERE user_id = %s 
+                AND external_visit_time = %s 
+                AND external_mo_name = %s
+                AND status = 'active'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+                self.appointments_db.cursor.execute(query, (user_id, visit_time, mo_name))
             row = self.appointments_db.cursor.fetchone()
             return row[0] if row else None
         except Exception as e:
@@ -557,27 +606,30 @@ class SyncService:
                 appointment_data = patient_data['appointment_data']
                 metadata = patient_data['metadata']
 
-                # Проверяем, не существует ли уже такая запись
                 visit_time = metadata['visit_time']
                 mo_name = metadata['mo_name']
 
-                if self.appointments_db.appointment_exists(user_id, visit_time, mo_name):
-                    logger.debug(f"Запись уже существует для user_id={user_id}")
-                    continue
-
                 # Сохраняем запись в БД
-                success = self.appointments_db.add_appointment(
+                save_result = self.appointments_db.add_appointment(
                     user_id=user_id,
                     appointment_data=appointment_data,
                     visit_time=visit_time,
                     mo_name=mo_name
                 )
 
-                if success:
+                if not save_result.get('success'):
+                    continue
+
+                if save_result.get('inserted'):
                     total_saved += 1
 
                     # Получаем ID сохраненной записи для кнопки отмены
-                    db_id = self._get_last_inserted_id(user_id, visit_time, mo_name)
+                    db_id = save_result.get('id') or self._get_last_inserted_id(
+                        user_id,
+                        visit_time,
+                        mo_name,
+                        book_id_mis=appointment_data.get('Book_Id_Mis')
+                    )
 
                     # Подготавливаем данные для уведомления
                     if user_id not in user_appointments:

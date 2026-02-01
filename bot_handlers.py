@@ -355,6 +355,20 @@ async def message_callback(event: MessageCallback):
             book_id_mis = appointment_data.get('Book_Id_Mis')
             cancel_reason = getattr(getattr(sync_service, 'cancel_service', None), 'DEFAULT_REASON', "CANCELED_BY_PATIENT")
 
+            if not book_id_mis:
+                log_user_event(
+                    user_id,
+                    "appointment_cancel_failed",
+                    error="missing_book_id_mis",
+                    appointment_id=appointment_id
+                )
+                await event.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Не удалось отменить запись: отсутствует идентификатор записи (Book_Id_Mis) во внешней системе.\n"
+                         "Попробуйте отменить запись по телефону 122."
+                )
+                return
+
             cancel_service = getattr(sync_service, 'cancel_service', None)
             if not cancel_service:
                 log_system_event("appointment", "cancel_failed",
@@ -389,7 +403,12 @@ async def message_callback(event: MessageCallback):
 
             # Проверяем статус-код в ответе внешней системы (например, RECORD_NOT_FOUND)
             response_text = cancel_result.get('response', '') or ''
-            if "<Status_Code>SUCCESS</Status_Code>" not in response_text:
+            import re
+            success_match = re.search(
+                r"<(?:\w+:)?Status_Code>\s*SUCCESS\s*</(?:\w+:)?Status_Code>",
+                response_text
+            )
+            if not success_match:
                 log_user_event(
                     user_id,
                     "appointment_cancel_failed",

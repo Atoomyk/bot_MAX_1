@@ -288,10 +288,276 @@ class UserDatabase:
             # 3. Если ничего не было, создаем
             self._add_column_if_not_exists("booking_source", "VARCHAR(20) DEFAULT 'self_bot'", "appointments")
 
+            # --- Миграция: book_id_mis для дедупликации/отмены ---
+            self._migrate_appointments_book_id_mis()
+            # --- Миграция: поле отправки напоминания (24ч) ---
+            self._add_column_if_not_exists("reminder_24h_sent_at", "TIMESTAMP", "appointments")
+
             log_system_event("database", "mvp_tables_initialized")
         except psycopg2.Error as e:
             log_system_event("database", "mvp_tables_init_error", error=str(e))
             self.conn.rollback()
+
+    def _migrate_appointments_book_id_mis(self):
+        """
+        Безопасная миграция:
+        - добавляет колонку book_id_mis в appointments
+        - бэкендит данные из appointment_json->>'Book_Id_Mis'
+        - дедуплицирует записи по (user_id, book_id_mis) с бэкапом дублей
+        - добавляет UNIQUE constraint на (user_id, book_id_mis)
+        """
+        if not self.conn:
+            return
+
+        try:
+            # 1) Колонка book_id_mis
+            self._add_column_if_not_exists("book_id_mis", "TEXT", "appointments")
+
+            # 2) Нормализация пустых значений
+            self.cursor.execute(
+                """
+                UPDATE appointments
+                SET book_id_mis = NULL
+                WHERE book_id_mis IS NOT NULL AND BTRIM(book_id_mis) = ''
+                """
+            )
+            self.conn.commit()
+
+            # 3) Backfill из JSON (если есть ключ Book_Id_Mis)
+            self.cursor.execute(
+                """
+                UPDATE appointments
+                SET book_id_mis = appointment_json->>'Book_Id_Mis'
+                WHERE (book_id_mis IS NULL OR BTRIM(book_id_mis) = '')
+                  AND appointment_json ? 'Book_Id_Mis'
+                """
+            )
+            self.conn.commit()
+
+            # 4) Повторная нормализация (на случай если JSON вернул пустую строку)
+            self.cursor.execute(
+                """
+                UPDATE appointments
+                SET book_id_mis = NULL
+                WHERE book_id_mis IS NOT NULL AND BTRIM(book_id_mis) = ''
+                """
+            )
+            self.conn.commit()
+
+            # 5) Дедупликация по (user_id, book_id_mis) с бэкапом
+            self._dedupe_appointments_by_book_id_mis()
+
+            # 6) Уникальность (user_id, book_id_mis)
+            self._ensure_unique_constraint_user_book_id_mis()
+
+            log_system_event("database", "appointments_book_id_mis_migrated")
+        except Exception as e:
+            log_system_event("database", "appointments_book_id_mis_migration_failed", error=str(e))
+            if self.conn:
+                self.conn.rollback()
+
+    def _ensure_unique_constraint_user_book_id_mis(self):
+        """
+        Добавляет UNIQUE constraint на (user_id, book_id_mis), если его ещё нет.
+        PostgreSQL допускает несколько NULL, поэтому старые записи без book_id_mis не конфликтуют.
+        """
+        try:
+            self.cursor.execute(
+                """
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE table_name = 'appointments'
+                  AND constraint_name = 'uniq_appointments_user_book_id_mis'
+                LIMIT 1
+                """
+            )
+            if self.cursor.fetchone():
+                return
+
+            # Перед добавлением констрейнта убеждаемся, что дублей по book_id_mis не осталось.
+            # На всякий случай "разруливаем" остаточные дубли без удаления строк:
+            # оставляем book_id_mis только на одной (самой новой) записи в группе.
+            self.cursor.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY user_id, book_id_mis
+                            ORDER BY created_at DESC NULLS LAST, id DESC
+                        ) AS rn
+                    FROM appointments
+                    WHERE book_id_mis IS NOT NULL
+                )
+                UPDATE appointments a
+                SET book_id_mis = NULL
+                FROM ranked r
+                WHERE a.id = r.id AND r.rn > 1
+                """
+            )
+            self.conn.commit()
+
+            self.cursor.execute(
+                """
+                ALTER TABLE appointments
+                ADD CONSTRAINT uniq_appointments_user_book_id_mis
+                UNIQUE (user_id, book_id_mis)
+                """
+            )
+            self.conn.commit()
+            log_system_event("database", "appointments_book_id_mis_unique_added")
+        except Exception as e:
+            log_system_event("database", "appointments_book_id_mis_unique_failed", error=str(e))
+            if self.conn:
+                self.conn.rollback()
+
+    def _dedupe_appointments_by_book_id_mis(self):
+        """
+        Убирает дубли по (user_id, book_id_mis):
+        - сохраняет все дубли в таблицу appointments_dedup_backup
+        - мерджит appointment_json в одну "основную" запись
+        - удаляет остальные строки-дубли
+        """
+        import json
+        from datetime import datetime
+
+        def deep_merge_keep_truthy(base, incoming):
+            """Рекурсивный merge dict: заполняем пропуски, не затираем непустое."""
+            if not isinstance(base, dict) or not isinstance(incoming, dict):
+                return base if base not in (None, "", [], {}) else incoming
+            out = dict(base)
+            for k, v in incoming.items():
+                if k not in out or out[k] in (None, "", [], {}):
+                    out[k] = v
+                    continue
+                if isinstance(out[k], dict) and isinstance(v, dict):
+                    out[k] = deep_merge_keep_truthy(out[k], v)
+            return out
+
+        try:
+            self.cursor.execute(
+                """
+                SELECT user_id, book_id_mis,
+                       array_agg(id ORDER BY created_at DESC NULLS LAST, id DESC) AS ids,
+                       array_agg(appointment_json ORDER BY created_at DESC NULLS LAST, id DESC) AS jsons
+                FROM appointments
+                WHERE book_id_mis IS NOT NULL
+                GROUP BY user_id, book_id_mis
+                HAVING COUNT(*) > 1
+                """
+            )
+            groups = self.cursor.fetchall()
+            if not groups:
+                return
+
+            # Бэкап-таблица для дублей (без ограничений, чтобы можно было повторно запускать)
+            self.cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS appointments_dedup_backup (
+                    id BIGINT,
+                    user_id BIGINT,
+                    book_id_mis TEXT,
+                    appointment_json JSONB,
+                    external_visit_time TIMESTAMP,
+                    external_mo_name TEXT,
+                    created_at TIMESTAMP,
+                    status VARCHAR(50),
+                    cancelled_at TIMESTAMP,
+                    booking_source VARCHAR(20),
+                    cancelled_by VARCHAR(50),
+                    backed_up_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            self.conn.commit()
+
+            for user_id, book_id_mis, ids, jsons in groups:
+                if not ids or len(ids) < 2:
+                    continue
+
+                keep_id = ids[0]
+                dup_ids = ids[1:]
+
+                merged = {}
+                for j in jsons:
+                    if j is None:
+                        continue
+                    if isinstance(j, str):
+                        try:
+                            j = json.loads(j)
+                        except Exception:
+                            continue
+                    if not isinstance(j, dict):
+                        continue
+                    merged = deep_merge_keep_truthy(merged, j)
+
+                # Обогащаем/фиксируем ключи
+                merged["Book_Id_Mis"] = book_id_mis
+
+                # Пытаемся вычислить внешние поля
+                mo_name = merged.get("Мед учреждение") or merged.get("external_mo_name") or None
+                visit_raw = merged.get("Дата записи") or merged.get("external_visit_time") or None
+
+                def parse_dt(s):
+                    if not s:
+                        return None
+                    if isinstance(s, datetime):
+                        return s.replace(tzinfo=None) if s.tzinfo else s
+                    if not isinstance(s, str):
+                        s = str(s)
+                    s = s.strip()
+                    if not s:
+                        return None
+                    try:
+                        dt = datetime.fromisoformat(s)
+                        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+                    except Exception:
+                        return None
+
+                visit_dt = parse_dt(visit_raw)
+
+                # Бэкапим строки-дубли
+                self.cursor.execute(
+                    """
+                    INSERT INTO appointments_dedup_backup (
+                        id, user_id, book_id_mis, appointment_json,
+                        external_visit_time, external_mo_name,
+                        created_at, status, cancelled_at, booking_source, cancelled_by,
+                        backed_up_at
+                    )
+                    SELECT
+                        id, user_id, book_id_mis, appointment_json,
+                        external_visit_time, external_mo_name,
+                        created_at, status, cancelled_at, booking_source, cancelled_by,
+                        NOW()
+                    FROM appointments
+                    WHERE id = ANY(%s)
+                    """,
+                    (dup_ids,)
+                )
+
+                # Обновляем основную запись (оставляем статус active)
+                self.cursor.execute(
+                    """
+                    UPDATE appointments
+                    SET appointment_json = %s,
+                        book_id_mis = %s,
+                        external_visit_time = COALESCE(%s, external_visit_time),
+                        external_mo_name = COALESCE(%s, external_mo_name)
+                    WHERE id = %s
+                    """,
+                    (json.dumps(merged, ensure_ascii=False), book_id_mis, visit_dt, mo_name, keep_id)
+                )
+
+                # Удаляем дубли
+                self.cursor.execute("DELETE FROM appointments WHERE id = ANY(%s)", (dup_ids,))
+
+            self.conn.commit()
+            log_system_event("database", "appointments_book_id_mis_dedup_done", groups=len(groups))
+        except Exception as e:
+            log_system_event("database", "appointments_book_id_mis_dedup_failed", error=str(e))
+            if self.conn:
+                self.conn.rollback()
 
     # ---------------------------------------------------------------------
     # Создание записи для нового пользователя
@@ -666,6 +932,7 @@ class UserDatabase:
         """
         try:
             import json
+            from datetime import datetime
             
             # Проверка существования пользователя в users
             self.cursor.execute(
@@ -679,8 +946,64 @@ class UserDatabase:
             # Извлекаем ключевые поля для удобства (если они есть в JSON)
             # Структура JSON зависит от API, но предполагаем наличие даты и МО
             # Приоритет отдаем start_time, так как там лежит полный timestamp (Date + Time)
-            external_visit_time = appointment_data.get('start_time') or appointment_data.get('visit_time')
-            external_mo_name = appointment_data.get('mo_name') or appointment_data.get('lpu_name')
+            external_mo_name = (
+                appointment_data.get('external_mo_name')
+                or appointment_data.get('mo_name')
+                or appointment_data.get('lpu_name')
+                or appointment_data.get('Мед учреждение')
+            )
+
+            visit_time_raw = (
+                appointment_data.get('external_visit_time')
+                or appointment_data.get('start_time')
+                or appointment_data.get('visit_time')
+                or appointment_data.get('Дата записи')
+            )
+
+            def _parse_external_visit_time(value):
+                if value is None:
+                    return None
+                if isinstance(value, datetime):
+                    # Если это aware datetime, сохраняем "стеночное" время без tz,
+                    # чтобы не зависеть от timezone настроек БД.
+                    return value.replace(tzinfo=None) if value.tzinfo else value
+                if not isinstance(value, str):
+                    value = str(value)
+                s = value.strip()
+                if not s:
+                    return None
+
+                # 1) ISO (включая YYYY-MM-DDTHH:MM:SS+03:00)
+                try:
+                    dt = datetime.fromisoformat(s)
+                    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+                except Exception:
+                    pass
+
+                # 2) Явные форматы, которые встречаются в проекте
+                formats = (
+                    "%d.%m.%Y %H:%M:%S",
+                    "%d.%m.%Y %H:%M",
+                    "%Y-%m-%dT%H:%M:%S%z",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                )
+                for fmt in formats:
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+                    except ValueError:
+                        continue
+                return None
+
+            external_visit_time = _parse_external_visit_time(visit_time_raw) or visit_time_raw
+
+            book_id_mis = (
+                appointment_data.get("book_id_mis")
+                or appointment_data.get("Book_Id_Mis")
+            )
+            if isinstance(book_id_mis, str):
+                book_id_mis = book_id_mis.strip() or None
             
             # Сериализуем JSON
             json_str = json.dumps(appointment_data, ensure_ascii=False)
@@ -690,19 +1013,92 @@ class UserDatabase:
                 INSERT INTO appointments (
                     user_id, 
                     appointment_json, 
+                    book_id_mis,
                     external_visit_time, 
                     external_mo_name, 
                     created_at, 
                     status, 
                     booking_source
                 )
-                VALUES (%s, %s, %s, %s, NOW(), 'active', %s)
+                VALUES (%s, %s, %s, %s, %s, NOW(), 'active', %s)
+                ON CONFLICT (user_id, book_id_mis)
+                DO UPDATE SET
+                    appointment_json = COALESCE(appointments.appointment_json, '{}'::jsonb) || EXCLUDED.appointment_json,
+                    external_visit_time = COALESCE(EXCLUDED.external_visit_time, appointments.external_visit_time),
+                    external_mo_name = COALESCE(EXCLUDED.external_mo_name, appointments.external_mo_name),
+                    status = 'active',
+                    cancelled_at = NULL
                 """,
-                (user_id, json_str, external_visit_time, external_mo_name, booking_source)
+                (user_id, json_str, book_id_mis, external_visit_time, external_mo_name, booking_source)
             )
             self.conn.commit()
             log_system_event("database", "appointment_added", user_id=user_id)
             return True
+        except psycopg2.IntegrityError as e:
+            # Если остался уникальный индекс idx_appointments_user_visit_mo (старое поведение),
+            # запись может конфликтовать по (user_id, external_visit_time, external_mo_name).
+            # В этом случае не падаем — обновляем существующую строку и проставляем book_id_mis.
+            constraint = getattr(getattr(e, "diag", None), "constraint_name", None)
+            pgcode = getattr(e, "pgcode", None)
+            if pgcode == "23505" and constraint == "idx_appointments_user_visit_mo":
+                try:
+                    if self.conn:
+                        self.conn.rollback()
+
+                    # Находим существующую запись по ключу (user_id, visit_time, mo_name)
+                    self.cursor.execute(
+                        """
+                        SELECT id, book_id_mis
+                        FROM appointments
+                        WHERE user_id = %s
+                          AND external_visit_time = %s
+                          AND external_mo_name = %s
+                        LIMIT 1
+                        """,
+                        (user_id, external_visit_time, external_mo_name),
+                    )
+                    row = self.cursor.fetchone()
+                    if not row:
+                        log_system_event("database", "appointment_add_failed", error=str(e), user_id=user_id)
+                        return False
+
+                    existing_id = row[0]
+                    existing_book_id = row[1]
+
+                    # Мерджим JSON в существующую строку и обновляем book_id_mis
+                    try:
+                        import json as _json
+                        patch = dict(appointment_data)
+                        if existing_book_id and book_id_mis and str(existing_book_id) != str(book_id_mis):
+                            patch.setdefault("Book_Id_Mis_Original", str(existing_book_id))
+                        patch_json = _json.dumps(patch, ensure_ascii=False)
+                    except Exception:
+                        patch_json = json_str
+
+                    self.cursor.execute(
+                        """
+                        UPDATE appointments
+                        SET appointment_json = COALESCE(appointment_json, '{}'::jsonb) || %s::jsonb,
+                            book_id_mis = COALESCE(%s, book_id_mis),
+                            status = 'active',
+                            cancelled_at = NULL
+                        WHERE id = %s
+                        """,
+                        (patch_json, book_id_mis, existing_id),
+                    )
+                    self.conn.commit()
+                    log_system_event("database", "appointment_added", user_id=user_id)
+                    return True
+                except Exception as inner:
+                    log_system_event("database", "appointment_add_failed", error=str(inner), user_id=user_id)
+                    if self.conn:
+                        self.conn.rollback()
+                    return False
+
+            log_system_event("database", "appointment_add_failed", error=str(e), user_id=user_id)
+            if self.conn:
+                self.conn.rollback()
+            return False
         except psycopg2.Error as e:
             log_system_event("database", "appointment_add_failed", error=str(e), user_id=user_id)
             self.conn.rollback()

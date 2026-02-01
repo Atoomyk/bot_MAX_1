@@ -3,10 +3,25 @@
 Модуль для парсинга SOAP-ответов от медицинского сервиса.
 """
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 class SoapResponseParser:
     """Парсер для обработки XML ответов SOAP сервиса"""
+
+    @staticmethod
+    def _extract_first_tag_value(xml_content: str, tag_name: str) -> Optional[str]:
+        """
+        Извлекает значение первого тега <tag_name>...</tag_name> из XML строки.
+        Учитывает возможные namespace-префиксы (<v2:Tag>) и переносы/пробелы.
+        """
+        import re
+        # (?:\w+:)? позволяет матчить <v2:Tag> и <Tag>
+        pattern = rf"<(?:\w+:)?{re.escape(tag_name)}>\s*([\s\S]*?)\s*</(?:\w+:)?{re.escape(tag_name)}>"
+        match = re.search(pattern, xml_content)
+        if not match:
+            return None
+        value = match.group(1)
+        return value.strip() if value is not None else None
     
     @staticmethod
     def parse_session_id(xml_content: str) -> Optional[str]:
@@ -221,8 +236,27 @@ class SoapResponseParser:
     @staticmethod
     def parse_booking_status(xml_content: str) -> bool:
         """Парсит ответ создания записи (CreateAppointmentResponse)"""
-        import re
-        match = re.search(r'<Status_Code>([^<]+)</Status_Code>', xml_content)
-        if match and match.group(1) == "SUCCESS":
-            return True
-        return False
+        status_code = SoapResponseParser._extract_first_tag_value(xml_content, "Status_Code")
+        return (status_code or "").strip().upper() == "SUCCESS"
+
+    @staticmethod
+    def parse_create_appointment_details(xml_content: str) -> Dict[str, Any]:
+        """
+        Парсит CreateAppointmentResponse и возвращает ключевые поля.
+
+        Возвращает dict с ключами:
+        - status_code: Optional[str]
+        - book_id_mis: Optional[str]
+        - visit_time: Optional[str] (как в XML, например 2025-12-17T09:15:00+03:00)
+        - room: Optional[str]
+        - slot_id: Optional[str]
+        - session_id: Optional[str]
+        """
+        return {
+            "status_code": SoapResponseParser._extract_first_tag_value(xml_content, "Status_Code"),
+            "book_id_mis": SoapResponseParser._extract_first_tag_value(xml_content, "Book_Id_Mis"),
+            "visit_time": SoapResponseParser._extract_first_tag_value(xml_content, "Visit_Time"),
+            "room": SoapResponseParser._extract_first_tag_value(xml_content, "Room"),
+            "slot_id": SoapResponseParser._extract_first_tag_value(xml_content, "Slot_Id"),
+            "session_id": SoapResponseParser._extract_first_tag_value(xml_content, "Session_ID"),
+        }

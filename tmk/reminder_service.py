@@ -184,40 +184,23 @@ class ReminderService:
                 elif wait_seconds > 0:
                     # Ждём точное время
                     await asyncio.sleep(wait_seconds)
-                
-                elif wait_seconds <= 0:
-                    # Время уже прошло - проверяем, не было ли уже отправлено
-                    # Удаляем из очереди без отправки
-                    await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        self.queue.get
-                    )
-                    
-                    # Проверяем в БД, не было ли уже отправлено / создано
-                    session = self.db.get_session_by_id(session_id)
-                    already_done = False
-                    if session:
-                        if reminder_type == 'call_start':
-                            already_done = session.get('call_started_at') is not None
-                        elif reminder_type == 'members_add':
-                            doctor_done = session.get('chat_doctor_added_at') is not None
-                            has_consent = session.get('consent_at') is not None
-                            patient_done = session.get('chat_patient_added_at') is not None
-                            already_done = doctor_done and (patient_done or not has_consent)
-                        else:
-                            already_done = session.get(f'reminder_{reminder_type}_sent_at') is not None
-                    if session and not already_done:
-                        # Время прошло, но не было отправлено - логируем и пропускаем
+                else:
+                    # Если мы слегка опоздали (миллисекунды/секунды) — всё равно выполняем задачу.
+                    # Это важно, т.к. из-за планировщика/await sleep(60) мы можем проснуться чуть позже send_at.
+                    # Защита от "слишком поздних" действий делается на уровне обработчиков (например, 1 час для напоминаний).
+                    if wait_seconds < -3600:
+                        # Слишком поздно: удаляем из очереди и пропускаем.
+                        await asyncio.get_event_loop().run_in_executor(None, self.queue.get)
                         log_system_event(
                             "reminder_service",
-                            "reminder_time_passed",
+                            "reminder_time_too_old_queue_skip",
                             session_id=session_id,
                             reminder_type=reminder_type,
                             send_at=send_at.isoformat(),
                             now=now.isoformat(),
-                            wait_seconds=wait_seconds
+                            wait_seconds=wait_seconds,
                         )
-                    continue
+                        continue
                 
                 # Удаляем из очереди
                 await asyncio.get_event_loop().run_in_executor(
